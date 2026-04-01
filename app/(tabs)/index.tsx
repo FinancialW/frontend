@@ -21,7 +21,7 @@ export default function Index() {
       }
 
       const reissueRes = await fetch(`${API_BASE}/auth/reissue`, {
-        method: 'POST',
+        method: 'GET',
         credentials: 'include',
       });
 
