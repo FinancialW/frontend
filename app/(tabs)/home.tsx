@@ -119,7 +119,10 @@ export default function Home() {
     if (symbols.length === 0) return;
     
     try {
-      const res = await fetch(`${API_BASE}/stock/latest-prices?symbols=${symbols.join(',')}`);
+      const res = await fetch(
+        `${API_BASE}/stock/latest-prices?symbols=${symbols.join(',')}`,
+        { credentials: 'include' }
+      );
       
       if (res.ok) {
         const initialPrices = await res.json(); 
