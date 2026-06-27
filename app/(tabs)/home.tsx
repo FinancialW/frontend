@@ -1,3 +1,4 @@
+import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -27,62 +28,58 @@ interface SearchResult {
 
 export default function Home() {
   const router = useRouter();
-  
-  // 상태 관리
+
   const [member, setMember] = useState<Member | null>(null);
   const [loading, setLoading] = useState(true);
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [newSymbol, setNewSymbol] = useState('');
-  
-  // 실시간 가격 데이터를 저장할 상태
-  const [prices, setPrices] = useState<Record<string, number>>({});
 
-  // 검색 관련 상태
+  // 실시간 가격
+  const [prices, setPrices] = useState<Record<string, number>>({});
+  const [prevPrices, setPrevPrices] = useState<Record<string, number>>({});
+
+  // 검색
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
 
-  // 웹소켓 연결 참조
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     initializeData();
 
-    // 화면 이탈 시 웹소켓 종료
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      wsRef.current?.close();
     };
   }, []);
 
-  //  검색어 디바운스 및 API 호출 (오류 수정됨)
   useEffect(() => {
     if (!newSymbol.trim()) {
       setSearchResults([]);
       return;
     }
 
-    const debounceTimer = setTimeout(async () => { // async 추가
-      setIsSearching(true); // 괄호 및 true 추가
+    const timer = setTimeout(async () => {
+      setIsSearching(true);
       try {
-        const res = await fetch(`${API_BASE}/stock/search?q=${newSymbol.trim()}`, { 
-          credentials: 'include',
-        });
+        const res = await fetch(
+          `${API_BASE}/stock/search?q=${newSymbol.trim()}`,
+          { credentials: 'include' }
+        );
+
         if (res.ok) {
           const data = await res.json();
-          console.log('검색 결과:', data);
-          setSearchResults(data.result || []);
+          const resultsArray = data.result || [];
+          setSearchResults(resultsArray);
         }
       } catch (e) {
-        console.error('검색 중 에러:', e);
+        console.error(e);
       } finally {
         setIsSearching(false);
       }
     }, 300);
 
-    return () => clearTimeout(debounceTimer);
+    return () => clearTimeout(timer);
   }, [newSymbol]);
-
 
   const initializeData = async () => {
     try {
@@ -97,9 +94,9 @@ export default function Home() {
 
       const memberData = await res.json();
       setMember(memberData);
+
       await fetchWatchlistAndConnect();
     } catch (e) {
-      console.error(e);
       router.replace('/');
     } finally {
       setLoading(false);
@@ -107,349 +104,319 @@ export default function Home() {
   };
 
   const fetchWatchlistAndConnect = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/watchlist`, {
-        credentials: 'include',
-      });
+    const res = await fetch(`${API_BASE}/watchlist`, {
+      credentials: 'include',
+    });
 
+    if (res.ok) {
+      const symbols: string[] = await res.json();
+      setWatchlist(symbols);
+      fetchInitialPrices(symbols);
+      connectWebSocket(symbols);
+    }
+  };
+  const fetchInitialPrices = async (symbols: string[]) => {
+    if (symbols.length === 0) return;
+    
+    try {
+      const res = await fetch(`${API_BASE}/stock/latest-prices?symbols=${symbols.join(',')}`);
+      
       if (res.ok) {
-        const symbols: string[] = await res.json();
-        setWatchlist(symbols);
-        connectWebSocket(symbols);
+        const initialPrices = await res.json(); 
+        setPrices(prev => ({
+          ...prev,
+          ...initialPrices
+        }));
       }
     } catch (e) {
-      console.error('관심 종목 조회 실패:', e);
+      console.error("초기 가격을 불러오는데 실패했습니다.", e);
     }
   };
 
+
   const connectWebSocket = (symbols: string[]) => {
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
+    wsRef.current?.close();
 
     const ws = new WebSocket(WS_BASE);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log(' 웹소켓 연결 성공');
-      ws.send(JSON.stringify({ type: 'ENTER', symbols: symbols }));
+      ws.send(JSON.stringify({ type: 'ENTER', symbols }));
     };
 
     ws.onmessage = (event) => {
-      //  백엔드에서 보내주는 새로운 포맷에 맞게 파싱 로직 수정
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'PRICE') {
-          setPrices(prev => ({
-            ...prev,
-            [data.symbol]: parseFloat(data.price) 
-          }));
-        }
-      } catch (e) {
-        console.log('메시지 파싱 에러 또는 일반 텍스트:', event.data);
-      }
-    };
 
-    ws.onerror = (error) => console.error(' 웹소켓 에러:', error);
-    ws.onclose = () => console.log('🔌 웹소켓 연결 종료');
+        if (data.type === 'PRICE') {
+          setPrices(prev => {
+            setPrevPrices(prev); // 이전값 저장
+            return {
+              ...prev,
+              [data.symbol]: parseFloat(data.price),
+            };
+          });
+        }
+      } catch {}
+    };
   };
 
-  //  검색 결과에서 선택했을 때 실행되는 함수 추가
-  const handleSelectAndAddSymbol = async (symbolToAdd: string) => {
-    Keyboard.dismiss(); 
-    setSearchResults([]); 
-    setNewSymbol(''); 
+  // ⭐️ 검색 선택
+  const handleSelectAndAddSymbol = async (symbol: string) => {
+    Keyboard.dismiss();
+    setSearchResults([]);
+    setNewSymbol('');
 
-    if (watchlist.includes(symbolToAdd)) {
-      Alert.alert('알림', '이미 추가된 종목입니다.');
+    if (watchlist.includes(symbol)) {
+      Alert.alert('이미 추가된 종목입니다.');
       return;
     }
 
-    try {
-      const res = await fetch(`${API_BASE}/watchlist?symbol=${symbolToAdd}`, {
-        method: 'POST',
-        credentials: 'include',
-      });
+    const res = await fetch(`${API_BASE}/watchlist?symbol=${symbol}`, {
+      method: 'POST',
+      credentials: 'include',
+    });
 
-      if (res.ok) {
-        setWatchlist(prev => [...prev, symbolToAdd]);
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: 'ADD', symbol: symbolToAdd }));
-        }
-      } else {
-        Alert.alert('오류', '종목 추가에 실패했습니다.');
-      }
-    } catch (e) {
-      console.error('추가 중 에러:', e);
+    if (res.ok) {
+      setWatchlist(prev => [...prev, symbol]);
+      await fetchInitialPrices([symbol]); // 새로 추가된 종목의 가격도 불러오기
+
+      wsRef.current?.send(
+        JSON.stringify({ type: 'ADD', symbol })
+      );
     }
   };
 
-  const handleAddSymbol = async () => {
-    const symbolToAdd = newSymbol.trim().toUpperCase();
-    if (!symbolToAdd) return;
-    handleSelectAndAddSymbol(symbolToAdd); // 중복 로직 제거
-  };
+  const handleRemoveSymbol = async (symbol: string) => {
+    const res = await fetch(`${API_BASE}/watchlist?symbol=${symbol}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
 
-  const handleRemoveSymbol = async (symbolToRemove: string) => {
-    try {
-      const res = await fetch(`${API_BASE}/watchlist?symbol=${symbolToRemove}`, {
-        method: 'DELETE',
-        credentials: 'include',
+    if (res.ok) {
+      setWatchlist(prev => prev.filter(s => s !== symbol));
+
+      setPrices(prev => {
+        const copy = { ...prev };
+        delete copy[symbol];
+        return copy;
       });
 
-      if (res.ok) {
-        setWatchlist(prev => prev.filter(s => s !== symbolToRemove));
-        
-        setPrices(prev => {
-          const newPrices = { ...prev };
-          delete newPrices[symbolToRemove];
-          return newPrices;
-        });
-
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: 'REMOVE', symbol: symbolToRemove }));
-        }
-      } else {
-        Alert.alert('오류', '종목 삭제에 실패했습니다.');
-      }
-    } catch (e) {
-      console.error('삭제 중 에러:', e);
+      wsRef.current?.send(
+        JSON.stringify({ type: 'REMOVE', symbol })
+      );
     }
   };
 
   const handleLogout = async () => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    try {
-      await fetch(`${API_BASE}/auth/logout`, {
-        method: 'POST',
-        credentials: 'include',
-      });
-    } catch (e) {
-      console.error('로그아웃 에러', e);
-    } finally {
-      router.replace('/');
-    }
+    wsRef.current?.close();
+
+    await fetch(`${API_BASE}/auth/logout`, {
+      method: 'POST',
+      credentials: 'include',
+    });
+
+    router.replace('/');
   };
 
   if (loading) {
     return (
-      <View style={styles.centerContainer}>
-        <ActivityIndicator size="large" color="#FEE500" />
+      <View style={styles.center}>
+        <ActivityIndicator size="large" />
       </View>
     );
   }
 
   return (
     <View style={styles.container}>
-      <View style={styles.profileCard}>
-        <Text style={styles.nickname}>{member?.memberName}님의 관심 종목</Text>
-        <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
-          <Text style={styles.logoutText}>로그아웃</Text>
+      {/* 헤더 */}
+      <View style={styles.header}>
+        <Text style={styles.title}>
+          {member?.memberName}님의 관심 종목
+        </Text>
+        <TouchableOpacity onPress={handleLogout}>
+          <Text style={{ color: 'red' }}>로그아웃</Text>
         </TouchableOpacity>
       </View>
 
-      {/* ⭐️ 종목 검색 및 추가 영역 */}
-      <View style={styles.searchSection}>
-        <View style={styles.inputContainer}>
-          <TextInput
-            style={styles.input}
-            placeholder="종목코드 또는 회사명 검색 (예: Apple)"
-            value={newSymbol}
-            onChangeText={setNewSymbol}
-            autoCapitalize="none"
-          />
-          {isSearching ? (
-            <ActivityIndicator size="small" color="#FEE500" style={{ marginRight: 10 }} />
-          ) : (
-            <TouchableOpacity style={styles.addButton} onPress={handleAddSymbol}>
-              <Text style={styles.addButtonText}>추가</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-
-        {/* ⭐️ 검색 결과 드롭다운 UI 추가 */}
-        {searchResults.length > 0 && (
-          <View style={styles.dropdownContainer}>
-            <FlatList
-              data={searchResults}
-              keyExtractor={(item, index) => `${item.symbol}-${index}`}
-              keyboardShouldPersistTaps="handled" 
-              renderItem={({ item }) => (
-                <TouchableOpacity 
-                  style={styles.dropdownItem} 
-                  onPress={() => handleSelectAndAddSymbol(item.symbol)}
-                >
-                  <Text style={styles.dropdownSymbol}>{item.symbol}</Text>
-                  <Text style={styles.dropdownDesc} numberOfLines={1}>{item.description}</Text>
-                </TouchableOpacity>
-              )}
-            />
-          </View>
+      {/* 검색 */}
+      <View style={styles.searchBox}>
+        <Ionicons
+          name="search"
+          size={20}
+          color="#999"
+          style={styles.searchIcon}
+        />
+        <TextInput
+          value={newSymbol}
+          onChangeText={setNewSymbol}
+          placeholder="종목 검색 (예: AAPL)"
+          placeholderTextColor="#999"
+          autoCapitalize="characters"
+          autoCorrect={false}
+          returnKeyType="search"
+          style={styles.input}
+        />
+        {newSymbol.length > 0 && (
+          <TouchableOpacity
+            onPress={() => setNewSymbol('')}
+            hitSlop={8}
+          >
+            <Ionicons name="close-circle" size={20} color="#bbb" />
+          </TouchableOpacity>
+        )}
+        {isSearching && (
+          <ActivityIndicator size="small" style={styles.searchSpinner} />
         )}
       </View>
 
+      {searchResults.length > 0 && (
+        <View style={styles.dropdown}>
+          <FlatList
+            data={searchResults}
+            keyExtractor={(item) => item.symbol}
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                style={styles.dropdownItem}
+                onPress={() =>
+                  handleSelectAndAddSymbol(item.symbol)
+                }
+              >
+                <Text>{item.symbol}</Text>
+                <Text style={{ color: '#888' }}>
+                  {item.description}
+                </Text>
+              </TouchableOpacity>
+            )}
+          />
+        </View>
+      )}
+
+      {/* 리스트 */}
       <FlatList
         data={watchlist}
         keyExtractor={(item) => item}
-        renderItem={({ item }) => (
-          <View style={styles.listItem}>
-            <View>
-              <Text style={styles.symbolText}>{item}</Text>
-              <Text style={styles.priceText}>
-                {prices[item] ? `$${prices[item].toFixed(2)}` : '로딩 중...'}
-              </Text>
+        renderItem={({ item }) => {
+          const price = prices[item];
+          const prev = prevPrices[item];
+
+          const color =
+            prev !== undefined
+              ? price > prev
+                ? '#ff4d4f'
+                : '#1890ff'
+              : '#333';
+
+          return (
+            <View style={styles.item}>
+              {/* 왼쪽 클릭 영역 */}
+              <TouchableOpacity
+                style={{ flex: 1 }}
+                activeOpacity={0.7}
+                onPress={() =>
+                  router.push({
+                    pathname: '/detail',
+                    params: { 
+                      symbol: item, 
+                      initialPrice : price
+                    },
+                  })
+                }
+              >
+                <Text style={styles.symbol}>{item}</Text>
+
+                {price !== undefined ? (
+                  <Text style={{ color }}>
+                    {price.toFixed(2)} USD
+                  </Text>
+                ) : (
+                  <ActivityIndicator size="small" />
+                )}
+              </TouchableOpacity>
+
+              {/* 삭제 버튼 */}
+              <TouchableOpacity
+                onPress={() => handleRemoveSymbol(item)}
+              >
+                <Text style={{ color: 'red' }}>삭제</Text>
+              </TouchableOpacity>
             </View>
-            <TouchableOpacity
-              style={styles.deleteButton}
-              onPress={() => handleRemoveSymbol(item)}
-            >
-              <Text style={styles.deleteButtonText}>삭제</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-        ListEmptyComponent={<Text style={styles.emptyText}>관심 종목이 없습니다.</Text>}
-        contentContainerStyle={{ paddingBottom: 20 }}
+          );
+        }}
       />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  centerContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
   container: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
     padding: 20,
     paddingTop: 60,
+    backgroundColor: '#f5f5f5',
   },
-  profileCard: {
+  center: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
     marginBottom: 20,
   },
-  nickname: {
-    fontSize: 20,
+  title: {
+    fontSize: 18,
     fontWeight: 'bold',
   },
-  logoutButton: {
-    backgroundColor: '#ff4d4f',
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 6,
-  },
-  logoutText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
-  // ⭐️ 검색 영역용 스타일
-  searchSection: {
-    zIndex: 10, 
-    marginBottom: 20,
-  },
-  inputContainer: {
+  searchBox: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#fff',
+    paddingHorizontal: 12,
+    height: 48,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: '#ddd',
-    borderRadius: 8,
-    paddingHorizontal: 15,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  searchIcon: {
+    marginRight: 8,
+  },
+  searchSpinner: {
+    marginLeft: 8,
   },
   input: {
     flex: 1,
-    paddingVertical: 12,
     fontSize: 16,
-    marginRight: 10,
+    color: '#222',
+    paddingVertical: 0,
   },
-  addButton: {
-    backgroundColor: '#FEE500',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-  },
-  addButtonText: {
-    fontWeight: 'bold',
-    color: '#333',
-  },
-  // ⭐️ 검색 결과 드롭다운 스타일
-  dropdownContainer: {
-    position: 'absolute',
-    top: 55, 
-    left: 0,
-    right: 0,
+  dropdown: {
     backgroundColor: '#fff',
+    marginTop: 5,
     borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    maxHeight: 200, 
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 5,
+    maxHeight: 200,
   },
   dropdownItem: {
-    padding: 15,
+    padding: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#eee',
+    borderColor: '#eee',
   },
-  dropdownSymbol: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#333',
-  },
-  dropdownDesc: {
-    fontSize: 12,
-    color: '#888',
-    marginTop: 4,
-  },
-  listItem: {
+  item: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
     backgroundColor: '#fff',
-    padding: 20,
-    borderRadius: 12,
-    marginBottom: 10,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 5,
-    elevation: 2,
+    padding: 15,
+    borderRadius: 10,
+    marginTop: 10,
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
-  symbolText: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 4,
-  },
-  priceText: {
+  symbol: {
     fontSize: 16,
-    color: '#0066cc',
-    fontWeight: '600',
-  },
-  deleteButton: {
-    backgroundColor: '#ffe6e6',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 6,
-  },
-  deleteButtonText: {
-    color: '#ff4d4f',
     fontWeight: 'bold',
-  },
-  emptyText: {
-    textAlign: 'center',
-    color: '#888',
-    marginTop: 40,
   },
 });

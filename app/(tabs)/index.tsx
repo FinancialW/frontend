@@ -1,6 +1,6 @@
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native'; // Platform 추가
 
 const API_BASE = 'http://192.168.0.33:8080';
 
@@ -30,7 +30,6 @@ export default function Index() {
         return;
       }
       
-      // 모든 단계 실패 시 로그인 버튼 노출
       setChecking(false);
     } catch (e) {
       console.log("인증 체크 실패 (로그아웃 상태)");
@@ -38,7 +37,17 @@ export default function Index() {
     }
   };
 
-  // 토큰 확인 중 로딩 스피너
+  // ✅ 버튼을 눌렀을 때 플랫폼별로 다르게 동작하는 함수 추가
+  const handleKakaoLogin = () => {
+    if (Platform.OS === 'web') {
+      // 1. 웹(컴퓨터)인 경우: WebView를 쓰지 않고 브라우저 자체를 로그인 주소로 이동시킵니다.
+      window.location.href = `${API_BASE}/auth/kakao`; 
+    } else {
+      // 2. 모바일(에뮬레이터/스마트폰)인 경우: 기존처럼 WebView 화면으로 이동합니다.
+      router.push('/webview');
+    }
+  };
+
   if (checking) {
     return (
       <View style={styles.container}>
@@ -47,13 +56,12 @@ export default function Index() {
     );
   }
 
-  // 토큰 없음 → 카카오 로그인 버튼 표시
   return (
     <View style={styles.container}>
       <Text style={styles.title}>로그인</Text>
       <TouchableOpacity
         style={styles.kakaoButton}
-        onPress={() => router.push('/webview')}
+        onPress={handleKakaoLogin} // ✅ 분기 처리된 함수 연결
       >
         <Text style={styles.kakaoText}>카카오로 로그인</Text>
       </TouchableOpacity>
