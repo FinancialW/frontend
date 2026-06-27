@@ -146,3 +146,7 @@ tsconfig.tsbuildinfo
 
 expo-env.d.ts
 # @end expo-cli
+
+# Expo prebuild로 생성되는 네이티브 폴더 (CNG로 언제든 재생성됨)
+/android
+/ios
