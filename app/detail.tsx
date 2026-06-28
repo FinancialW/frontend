@@ -1,11 +1,14 @@
+import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams } from "expo-router";
 import * as Haptics from "expo-haptics";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Dimensions,
+  Modal,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -13,13 +16,15 @@ import {
 import Animated, {
   FadeIn,
   FadeInDown,
+  runOnJS,
   useAnimatedStyle,
   useSharedValue,
   withSpring,
+  withTiming,
 } from "react-native-reanimated";
 
 import { LineChart } from "react-native-wagmi-charts";
-import Svg, { Line } from "react-native-svg";
+import Svg, { Line, Polyline } from "react-native-svg";
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -95,6 +100,7 @@ const getIntervalMs = (resolution: string) => {
 };
 
 const SCREEN_WIDTH = Dimensions.get("window").width - 40;
+const SCREEN_H = Dimensions.get("window").height;
 const CHART_HEIGHT = 300; // 보이는 차트 높이
 // wagmi LineChart는 height에서 하단 40px를 축 라벨용으로 예약한다.
 // 따라서 차트 높이를 +40 주고 yGutter=0으로 두면 그릴 수 있는 영역이 정확히 CHART_HEIGHT가 된다.
@@ -108,6 +114,16 @@ const COLOR_TEXT = "#191f28";
 const COLOR_SUBTLE = "#8b95a1";
 const COLOR_PILL_BG = "#f2f4f6";
 const COLOR_LINE = "#e5e8eb";
+
+// 이동평균선(MA) 색 — 토스 팔레트에 MA 색이 없어 단기/중기 2개만 신규 추가
+// (빨강 상승·파랑 하락·회색 보조색·차트 accentColor 와 비충돌하는 색으로 선정)
+const COLOR_MA5 = "#f59f00"; // MA5 (단기) — 주황
+const COLOR_MA20 = "#7048e8"; // MA20 (중기) — 보라
+
+// 도움말 바텀시트가 화면 밖에 숨어 있을 때의 translateY 값
+// 시트는 bottom:0 / maxHeight:82% 라 콘텐츠가 길면 600px 를 넘어 고정값으론 완전히 숨지 못한다.
+// 화면 높이만큼 내리면 기기 크기와 무관하게 시트가 항상 화면 밖으로 완전히 빠진다.
+const SHEET_HIDDEN_Y = SCREEN_H;
 
 // 천 단위 구분 + 소수점 2자리 포맷 (Hermes의 toLocaleString 옵션 미지원 회피)
 const formatPrice = (n: number) => {
@@ -126,6 +142,76 @@ const formatScrubDate = (ts: number, resolution: string) => {
   }
   return `${d.getFullYear()}. ${M}. ${D}`;
 };
+
+// 단순이동평균(SMA) — 슬라이딩 윈도우로 O(n) 계산.
+// window 미만 구간(앞쪽)은 null, 이후부터 평균값을 채운다.
+const computeSMA = (closes: number[], window: number): (number | null)[] => {
+  const out: (number | null)[] = new Array(closes.length).fill(null);
+  let sum = 0;
+  for (let i = 0; i < closes.length; i++) {
+    sum += closes[i];
+    if (i >= window) sum -= closes[i - window];
+    if (i >= window - 1) out[i] = sum / window;
+  }
+  return out;
+};
+
+// 도움말 시트 범례 칩 종류 (차트 오버레이와 색을 1:1로 맞춘다)
+type HelpLegend =
+  | { kind: "dot"; color: string; text: string } // 색 점 (선/색상 표현)
+  | { kind: "dash"; color: string; text: string } // 점선 표현 (지지·저항)
+  | { kind: "band"; text: string }; // 회색 가격 구간 띠
+
+type HelpSection = {
+  title: string;
+  body: string;
+  legend?: HelpLegend[];
+};
+
+// 도움말 시트 콘텐츠 (데이터 주도 렌더링) — 순서가 곧 시트에 보이는 순서
+const HELP_SECTIONS: HelpSection[] = [
+  {
+    title: "라인 차트와 스크럽",
+    body: "선은 기간 동안의 종가 흐름이에요. 차트를 손가락으로 길게 눌러 좌우로 움직이면(스크럽) 그 시점의 가격과 날짜를 위쪽에서 확인할 수 있어요.",
+  },
+  {
+    title: "기간 탭",
+    body: "차트 아래 1일·1주·1개월·3개월·1년·전체 탭으로 보는 기간을 바꿔요. 기간을 바꾸면 차트와 지표가 그 기간에 맞춰 다시 계산돼요.",
+  },
+  {
+    title: "등락률과 색상",
+    body: "한국 증시 관례를 따라요. 오르면 빨강, 내리면 파랑이에요. 헤더의 큰 등락 숫자는 전일 종가 대비이고, 그 아래 회색 줄은 선택한 기간의 시작 대비 변화예요.",
+    legend: [
+      { kind: "dot", color: COLOR_BULL, text: "상승" },
+      { kind: "dot", color: COLOR_BEAR, text: "하락" },
+    ],
+  },
+  {
+    title: "최고·최저·현재선",
+    body: "차트의 회색 가로선은 기간 내 최고가와 최저가 위치예요. 색이 들어간 가로선과 배지는 지금 가격(현재가)을 가리켜요.",
+  },
+  {
+    title: "이동평균선(MA)",
+    body: "최근 종가의 평균을 이은 선이에요. 위 차트의 주황선 MA5는 최근 5개 값의 평균(단기 흐름), 보라선 MA20은 최근 20개 값의 평균(중기 흐름)을 보여줘요. 차트 위 범례를 눌러 끄고 켤 수 있어요.",
+    legend: [
+      { kind: "dot", color: COLOR_MA5, text: "MA5 (단기)" },
+      { kind: "dot", color: COLOR_MA20, text: "MA20 (중기)" },
+    ],
+  },
+  {
+    title: "지지선과 저항선",
+    body: "회색 띠는 가격이 자주 머물렀던 구간이에요. 띠 위쪽의 빨강 점선은 저항(천장)으로 뚫고 오르면 상승 신호가 될 수 있고, 아래쪽 파랑 점선은 지지(바닥)로 깨고 내려가면 하락 신호가 될 수 있는 가격대예요.",
+    legend: [
+      { kind: "dash", color: COLOR_BULL, text: "저항(천장)" },
+      { kind: "dash", color: COLOR_BEAR, text: "지지(바닥)" },
+      { kind: "band", text: "가격 구간" },
+    ],
+  },
+];
+
+// 면책 문구 (시트 맨 아래 고정)
+const HELP_DISCLAIMER =
+  "이 화면의 정보는 투자 참고용이며 매매를 권유하지 않아요. 모든 투자 판단과 책임은 본인에게 있어요.";
 
 export default function Detail() {
   const { symbol, initialPrice } = useLocalSearchParams();
@@ -149,6 +235,18 @@ export default function Detail() {
   // 스크럽(차트 위 드래그) 상태
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [scrubbing, setScrubbing] = useState(false);
+
+  // 전일 종가 (candles 응답 meta 에서 추출 — 추가 네트워크 요청 없음)
+  const [prevClose, setPrevClose] = useState<number | null>(null);
+
+  // 이동평균선(MA) 표시 토글
+  const [showMA5, setShowMA5] = useState(true);
+  const [showMA20, setShowMA20] = useState(true);
+
+  // 도움말 바텀시트 상태/애니메이션 공유값
+  const [helpVisible, setHelpVisible] = useState(false);
+  const sheetTranslateY = useSharedValue(SHEET_HIDDEN_Y);
+  const backdropOpacity = useSharedValue(0);
 
   const updateLastCandle = useCallback(
     (price: number) => {
@@ -197,6 +295,19 @@ export default function Detail() {
 
       const result = json.chart.result[0];
       if (!result) return;
+
+      // 전일 종가: 1D 응답 meta 에서만 산출한다(home.tsx fetchPrevCloses 와 동일하게 1D + 동일 폴백 순서).
+      // chartPreviousClose 는 '조회 구간 시작 직전의 종가'라 비-1D 탭(1주/1개월/…)에서는 range 에 종속되어
+      // '전일 종가'가 아니라 구간 시작 전 종가(예: 1년 전 값)가 된다. 마운트 시 기본 resolution 이 1D 라
+      // 항상 1D 로 먼저 조회되므로, 1D 에서 한 번 잡은 값을 다른 탭으로 바꿔도 그대로 유지한다.
+      if (resolution === "1D") {
+        const meta = result.meta;
+        const pc =
+          meta?.previousClose ??
+          meta?.chartPreviousClose ??
+          meta?.regularMarketPreviousClose;
+        if (typeof pc === "number" && Number.isFinite(pc)) setPrevClose(pc);
+      }
 
       const quote = result.indicators?.quote?.[0];
       if (!quote) return;
@@ -276,8 +387,11 @@ export default function Detail() {
         const parsedData = JSON.parse(event.data);
         if (parsedData.type === "PRICE") {
           const price = parseFloat(parsedData.price);
-          setCurrentPrice(price);
-          updateLastCandle(price);
+          // 비정상(NaN) 가격은 무시한다 — 헤더 등락/차트가 'NaN'으로 오염되지 않게.
+          if (Number.isFinite(price)) {
+            setCurrentPrice(price);
+            updateLastCandle(price);
+          }
         }
       } catch {}
     };
@@ -316,6 +430,11 @@ export default function Detail() {
     [validData]
   );
 
+  // 이동평균선 계산용 종가 배열 + MA5/MA20 (스크럽 중에도 validData 참조 유지 → 재계산 안 됨)
+  const closes = useMemo(() => validData.map((d) => d.close), [validData]);
+  const ma5 = useMemo(() => computeSMA(closes, 5), [closes]);
+  const ma20 = useMemo(() => computeSMA(closes, 20), [closes]);
+
   // 기간 내 최고/최저/현재
   const dataHigh = validData.length ? Math.max(...validData.map((d) => d.high)) : 0;
   const dataLow = validData.length ? Math.min(...validData.map((d) => d.low)) : 0;
@@ -331,6 +450,38 @@ export default function Detail() {
     lastPrice !== null && basePrice ? (change / basePrice) * 100 : 0;
   const isUp = change >= 0;
   const accentColor = isUp ? COLOR_BULL : COLOR_BEAR;
+
+  // 등락 계산 (전일 종가 대비 — 헤더 메인 헤드라인용)
+  const dayChange =
+    lastPrice !== null && prevClose !== null ? lastPrice - prevClose : null;
+  const dayPct =
+    dayChange !== null && prevClose ? (dayChange / prevClose) * 100 : null;
+  const dayColor =
+    dayChange === null
+      ? COLOR_TEXT
+      : dayChange > 0
+        ? COLOR_BULL
+        : dayChange < 0
+          ? COLOR_BEAR
+          : COLOR_TEXT;
+
+  // 도움말 바텀시트 열기/닫기 (닫힘은 애니메이션 종료 후 언마운트)
+  const openHelp = () => {
+    haptic();
+    setHelpVisible(true);
+    backdropOpacity.value = withTiming(0.45, { duration: 200 });
+    sheetTranslateY.value = withSpring(0, { damping: 20, stiffness: 220 });
+  };
+  const closeHelp = () => {
+    backdropOpacity.value = withTiming(0, { duration: 180 });
+    sheetTranslateY.value = withTiming(SHEET_HIDDEN_Y, { duration: 220 }, (f) => {
+      if (f) runOnJS(setHelpVisible)(false);
+    });
+  };
+  const backdropStyle = useAnimatedStyle(() => ({ opacity: backdropOpacity.value }));
+  const sheetStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: sheetTranslateY.value }],
+  }));
 
   // 스크럽 중이면 해당 시점의 캔들을 헤더에 표시한다 (놓으면 다시 현재가).
   const activeCandle =
@@ -351,6 +502,26 @@ export default function Detail() {
   // 가격 → 차트 내부 Y 좌표 (yGutter=0, 그릴 수 있는 높이 = CHART_HEIGHT)
   const yFor = (price: number) =>
     CHART_HEIGHT * (1 - (price - domainMin) / domainSpan);
+
+  // MA 폴리라인 좌표 문자열은 스크럽(activeIndex)과 무관하므로 미리 메모해 둔다.
+  // (스크럽 중 매 프레임 리렌더에서 O(n) 문자열을 다시 만들지 않도록)
+  const maPoints = useMemo(() => {
+    const denom = Math.max(validData.length - 1, 1);
+    const build = (arr: (number | null)[]) =>
+      arr
+        .map((v, i) =>
+          v === null ? null : `${(i / denom) * SCREEN_WIDTH},${yFor(v)}`
+        )
+        .filter((p): p is string => p !== null)
+        .join(" ");
+    return {
+      ma5Points: build(ma5),
+      ma20Points: build(ma20),
+      ma5Count: ma5.filter((v) => v !== null).length,
+      ma20Count: ma20.filter((v) => v !== null).length,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ma5, ma20, validData.length, domainMin, domainSpan]);
 
   // 🔥 최고점 / 최저점 / 현재점 가로선 + 라벨 (토스 스타일)
   const renderPriceMarkers = () => {
@@ -485,8 +656,52 @@ export default function Detail() {
     );
   };
 
+  // 이동평균선(MA5/MA20) 오버레이 — SR/스크럽과 동일한 좌표계(yFor, x=(i/denom)*SCREEN_WIDTH) 사용.
+  // 전제: validData 가 finite close 만 남겨 중간 결측이 없으므로 computeSMA 의 null 은
+  // 항상 앞쪽 연속 구간뿐 → null 제거 후 이어 그려도 선이 끊기거나 잘못 이어지지 않는다.
+  const renderMovingAverages = () => {
+    if (!validData.length) return null;
+    const { ma5Points, ma20Points, ma5Count, ma20Count } = maPoints;
+
+    return (
+      <View style={StyleSheet.absoluteFill} pointerEvents="none">
+        <Svg width={SCREEN_WIDTH} height={CHART_HEIGHT}>
+          {showMA5 && ma5Count >= 2 && (
+            <Polyline
+              points={ma5Points}
+              fill="none"
+              stroke={COLOR_MA5}
+              strokeWidth={1.5}
+              opacity={0.9}
+            />
+          )}
+          {showMA20 && ma20Count >= 2 && (
+            <Polyline
+              points={ma20Points}
+              fill="none"
+              stroke={COLOR_MA20}
+              strokeWidth={1.5}
+              opacity={0.9}
+            />
+          )}
+        </Svg>
+      </View>
+    );
+  };
+
   return (
     <View style={styles.container}>
+      {/* 도움말 트리거 (우상단 ⓘ) */}
+      <Pressable
+        onPress={openHelp}
+        hitSlop={8}
+        style={styles.helpButton}
+        accessibilityRole="button"
+        accessibilityLabel="차트 도움말 열기"
+      >
+        <Ionicons name="help-circle-outline" size={24} color={COLOR_SUBTLE} />
+      </Pressable>
+
       {/* 헤더: 종목 / 현재가(또는 스크럽 시점가) / 등락(또는 시점) — 토스 스타일 */}
       <Animated.Text
         entering={FadeInDown.duration(400).springify().damping(18)}
@@ -501,10 +716,29 @@ export default function Detail() {
             <Text style={styles.currency}>USD</Text>
           </View>
           {activeCandle ? (
+            // 스크럽 중: 해당 시점 라벨
             <Text style={[styles.changeText, { color: COLOR_SUBTLE }]}>
               {formatScrubDate(activeCandle.timestamp, resolution)}
             </Text>
+          ) : dayChange !== null && dayPct !== null ? (
+            // 전일 종가 대비(메인) + 기간 시작 대비(보조)
+            <>
+              <Text
+                style={[styles.changeText, styles.changeTextTight, { color: dayColor }]}
+              >
+                {`${dayChange > 0 ? "▲" : dayChange < 0 ? "▼" : "–"} ${
+                  dayChange > 0 ? "+" : dayChange < 0 ? "-" : ""
+                }${formatPrice(Math.abs(dayChange))} (${
+                  dayChange > 0 ? "+" : dayChange < 0 ? "-" : ""
+                }${Math.abs(dayPct).toFixed(2)}%)`}
+              </Text>
+              <Text style={styles.subChangeText}>
+                {resolutionLabel} {change >= 0 ? "+" : ""}
+                {changePct.toFixed(2)}%
+              </Text>
+            </>
           ) : (
+            // 전일 종가 부재 시: 기간 시작 대비를 메인으로 폴백 (보조 줄 생략)
             <Text style={[styles.changeText, { color: accentColor }]}>
               {isUp ? "▲" : "▼"} {formatPrice(Math.abs(change))} ({changePct >= 0 ? "+" : ""}
               {changePct.toFixed(2)}%) · {resolutionLabel}
@@ -513,6 +747,40 @@ export default function Detail() {
         </Animated.View>
       ) : (
         <Text style={styles.loadingPrice}>로딩중...</Text>
+      )}
+
+      {/* 이동평균선 범례 + 토글 (누르면 해당 MA 선을 끄고 켠다) */}
+      {validData.length > 0 && (
+        <View style={styles.maLegend}>
+          <Pressable
+            style={styles.maLegendItem}
+            onPress={() => {
+              haptic();
+              setShowMA5((v) => !v);
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="MA5 선 켜고 끄기"
+          >
+            <View
+              style={[styles.maDot, { backgroundColor: COLOR_MA5, opacity: showMA5 ? 1 : 0.35 }]}
+            />
+            <Text style={[styles.maLegendText, { opacity: showMA5 ? 1 : 0.35 }]}>MA5</Text>
+          </Pressable>
+          <Pressable
+            style={styles.maLegendItem}
+            onPress={() => {
+              haptic();
+              setShowMA20((v) => !v);
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="MA20 선 켜고 끄기"
+          >
+            <View
+              style={[styles.maDot, { backgroundColor: COLOR_MA20, opacity: showMA20 ? 1 : 0.35 }]}
+            />
+            <Text style={[styles.maLegendText, { opacity: showMA20 ? 1 : 0.35 }]}>MA20</Text>
+          </Pressable>
+        </View>
       )}
 
       {/* 차트 */}
@@ -546,6 +814,8 @@ export default function Detail() {
             </LineChart.Provider>
             {/* 차트 위에 지지/저항선 렌더링 */}
             {renderSupportResistanceZones()}
+            {/* 이동평균선(MA): SR 밴드 위, 가격 마커 배지 아래 */}
+            {renderMovingAverages()}
             {/* 최고/최저/현재 가로선 + 라벨 */}
             {renderPriceMarkers()}
             {/* 스크럽 세로 가이드 */}
@@ -569,6 +839,67 @@ export default function Detail() {
           />
         ))}
       </View>
+
+      {/* 도움말 바텀시트 (지지/저항 + 차트 용어 통합) */}
+      <Modal
+        transparent
+        visible={helpVisible}
+        animationType="none"
+        onRequestClose={closeHelp}
+      >
+        <View style={{ flex: 1 }}>
+          {/* 배경 (탭하면 닫힘) */}
+          <AnimatedPressable
+            style={[StyleSheet.absoluteFill, styles.modalBackdrop, backdropStyle]}
+            onPress={closeHelp}
+          />
+          {/* 시트 — backdrop 의 형제로 두어 시트 내부 탭이 closeHelp 로 전파되지 않게 함 */}
+          <Animated.View style={[styles.sheet, sheetStyle]}>
+            <View style={styles.sheetHandle} />
+            <View style={styles.sheetHeader}>
+              <Text style={styles.sheetTitle}>차트, 어떻게 보나요?</Text>
+              <Pressable
+                onPress={closeHelp}
+                hitSlop={8}
+                style={styles.closeBtn}
+                accessibilityRole="button"
+                accessibilityLabel="닫기"
+              >
+                <Ionicons name="close" size={22} color={COLOR_SUBTLE} />
+              </Pressable>
+            </View>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              {HELP_SECTIONS.map((section) => (
+                <View key={section.title} style={styles.section}>
+                  <Text style={styles.sectionTitle}>{section.title}</Text>
+                  <Text style={styles.sectionBody}>{section.body}</Text>
+                  {section.legend ? (
+                    <View style={styles.legendRow}>
+                      {section.legend.map((item, i) => (
+                        <View key={i} style={styles.legendChip}>
+                          {item.kind === "dot" ? (
+                            <View
+                              style={[styles.legendDot, { backgroundColor: item.color }]}
+                            />
+                          ) : item.kind === "dash" ? (
+                            <View
+                              style={[styles.legendDash, { borderColor: item.color }]}
+                            />
+                          ) : (
+                            <View style={styles.legendBand} />
+                          )}
+                          <Text style={styles.legendText}>{item.text}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  ) : null}
+                </View>
+              ))}
+              <Text style={styles.disclaimer}>{HELP_DISCLAIMER}</Text>
+            </ScrollView>
+          </Animated.View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -607,6 +938,18 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "600",
     marginTop: 4,
+    marginBottom: 16,
+  },
+  // 2줄 헤더에서 메인 줄(전일 종가 대비)은 보조 줄과 붙도록 하단 여백을 줄인다.
+  changeTextTight: {
+    marginBottom: 2,
+  },
+  // 보조 줄(기간 시작 대비, 회색) — 차트 위 여백은 이 줄이 담당
+  subChangeText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: COLOR_SUBTLE,
+    marginTop: 2,
     marginBottom: 16,
   },
   loadingPrice: {
@@ -705,5 +1048,132 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
     color: "#4e5968",
+  },
+  // 도움말 트리거 (우상단 ⓘ)
+  helpButton: {
+    position: "absolute",
+    top: 60,
+    right: 20,
+    zIndex: 10,
+  },
+  // 이동평균선 범례 + 토글
+  maLegend: {
+    flexDirection: "row",
+    gap: 12,
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  maLegendItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingVertical: 4,
+  },
+  maDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  maLegendText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: COLOR_SUBTLE,
+  },
+  // 도움말 모달 / 바텀시트
+  modalBackdrop: {
+    backgroundColor: "#000",
+  },
+  sheet: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    paddingBottom: Platform.OS === "ios" ? 34 : 24,
+    maxHeight: "82%",
+  },
+  sheetHandle: {
+    alignSelf: "center",
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: COLOR_LINE,
+    marginBottom: 12,
+  },
+  sheetHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  sheetTitle: {
+    fontSize: 18,
+    fontWeight: "800",
+    color: COLOR_TEXT,
+  },
+  closeBtn: {
+    padding: 4,
+  },
+  // 도움말 섹션
+  section: {
+    marginBottom: 18,
+  },
+  sectionTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: COLOR_TEXT,
+    marginBottom: 6,
+  },
+  sectionBody: {
+    fontSize: 13,
+    color: "#4e5968",
+    lineHeight: 20,
+  },
+  // 범례 칩 (차트 색과 1:1 매칭)
+  legendRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    flexWrap: "wrap",
+    marginTop: 8,
+  },
+  legendChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+  legendDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  legendDash: {
+    width: 16,
+    height: 0,
+    borderTopWidth: 2,
+    borderStyle: "dashed",
+  },
+  legendBand: {
+    width: 16,
+    height: 12,
+    borderRadius: 3,
+    backgroundColor: "rgba(139,149,161,0.12)",
+    borderWidth: 1,
+    borderColor: COLOR_LINE,
+  },
+  legendText: {
+    fontSize: 12,
+    color: COLOR_SUBTLE,
+  },
+  // 면책 문구
+  disclaimer: {
+    fontSize: 12,
+    color: COLOR_SUBTLE,
+    lineHeight: 18,
+    marginTop: 4,
   },
 });

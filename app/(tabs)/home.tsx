@@ -67,6 +67,7 @@ function WatchRow({
   symbol,
   price,
   prevPrice,
+  prevClose,
   index,
   onPress,
   onRemove,
@@ -74,6 +75,7 @@ function WatchRow({
   symbol: string;
   price?: number;
   prevPrice?: number;
+  prevClose?: number;
   index: number;
   onPress: () => void;
   onRemove: () => void;
@@ -104,14 +106,23 @@ function WatchRow({
     ),
   }));
 
+  // 가격 색상은 "전일 종가" 대비로 정한다 (한국 관례: 상승=빨강, 하락=파랑, 동일=기본색).
   const priceColor =
-    price !== undefined && prevPrice !== undefined
-      ? price > prevPrice
+    price !== undefined && prevClose !== undefined
+      ? price > prevClose
         ? COLOR_BULL
-        : price < prevPrice
+        : price < prevClose
         ? COLOR_BEAR
         : COLOR_TEXT
       : COLOR_TEXT;
+
+  // 전일 종가 대비 등락액·등락률 (색상은 위 priceColor를 그대로 재사용)
+  const hasChange =
+    price !== undefined && prevClose !== undefined && prevClose !== 0;
+  const change = hasChange ? price! - prevClose! : 0;
+  const pct = hasChange ? (change / prevClose!) * 100 : 0;
+  const arrow = change > 0 ? '▲' : change < 0 ? '▼' : '–';
+  const sign = change > 0 ? '+' : change < 0 ? '-' : '';
 
   return (
     <Animated.View
@@ -149,6 +160,13 @@ function WatchRow({
                 {formatPrice(price)}
               </Text>
               <Text style={styles.currency}>USD</Text>
+              {hasChange && Number.isFinite(pct) && (
+                <Text style={[styles.change, { color: priceColor }]}>
+                  {`${arrow} ${sign}${formatPrice(Math.abs(change))} (${sign}${Math.abs(
+                    pct
+                  ).toFixed(2)}%)`}
+                </Text>
+              )}
             </View>
           ) : (
             <ActivityIndicator size="small" color={COLOR_SUBTLE} />
@@ -182,6 +200,8 @@ export default function Home() {
   // 실시간 가격
   const [prices, setPrices] = useState<Record<string, number>>({});
   const [prevPrices, setPrevPrices] = useState<Record<string, number>>({});
+  // 전일 종가 (가격 색상 기준)
+  const [prevCloses, setPrevCloses] = useState<Record<string, number>>({});
 
   // 검색
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
@@ -268,7 +288,48 @@ export default function Home() {
       const symbols: string[] = await res.json();
       setWatchlist(symbols);
       fetchInitialPrices(symbols);
+      fetchPrevCloses(symbols);
       connectWebSocket(symbols);
+    }
+  };
+
+  // 전일 종가를 불러온다. 캔들(Yahoo 형태) 응답의 meta.previousClose를 사용한다.
+  const fetchPrevCloses = async (symbols: string[]) => {
+    if (symbols.length === 0) return;
+
+    try {
+      const results = await Promise.all(
+        symbols.map(async (sym) => {
+          try {
+            const res = await fetch(
+              `${API_BASE}/candles?symbol=${sym}&resolution=1D`,
+              { credentials: 'include' }
+            );
+            if (!res.ok) return null;
+
+            const json = await res.json();
+            const meta = json?.chart?.result?.[0]?.meta;
+            const prevClose =
+              meta?.previousClose ??
+              meta?.chartPreviousClose ??
+              meta?.regularMarketPreviousClose;
+
+            return typeof prevClose === 'number' && Number.isFinite(prevClose)
+              ? ([sym, prevClose] as const)
+              : null;
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      setPrevCloses((prev) => {
+        const next = { ...prev };
+        for (const r of results) if (r) next[r[0]] = r[1];
+        return next;
+      });
+    } catch (e) {
+      console.error('전일 종가를 불러오는데 실패했습니다.', e);
     }
   };
 
@@ -344,6 +405,7 @@ export default function Home() {
       }
       setWatchlist((prev) => [...prev, symbol]);
       await fetchInitialPrices([symbol]); // 새로 추가된 종목의 가격도 불러오기
+      fetchPrevCloses([symbol]); // 전일 종가도 불러오기 (색상 기준)
 
       wsRef.current?.send(JSON.stringify({ type: 'ADD', symbol }));
     }
@@ -359,6 +421,12 @@ export default function Home() {
       setWatchlist((prev) => prev.filter((s) => s !== symbol));
 
       setPrices((prev) => {
+        const copy = { ...prev };
+        delete copy[symbol];
+        return copy;
+      });
+
+      setPrevCloses((prev) => {
         const copy = { ...prev };
         delete copy[symbol];
         return copy;
@@ -494,6 +562,7 @@ export default function Home() {
             symbol={item}
             price={prices[item]}
             prevPrice={prevPrices[item]}
+            prevClose={prevCloses[item]}
             index={index}
             onPress={() =>
               router.push({
@@ -655,6 +724,12 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLOR_SUBTLE,
     marginTop: 1,
+  },
+  change: {
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 2,
+    letterSpacing: -0.2,
   },
   removeBtn: {
     width: 28,
