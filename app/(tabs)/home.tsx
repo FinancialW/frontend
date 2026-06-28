@@ -1,20 +1,50 @@
 import { Ionicons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  FlatList,
   Keyboard,
+  Platform,
+  Pressable,
   StyleSheet,
   Text,
   TextInput,
-  TouchableOpacity,
-  View
+  View,
 } from 'react-native';
+import Animated, {
+  FadeIn,
+  FadeInDown,
+  FadeOut,
+  LinearTransition,
+  interpolateColor,
+  useAnimatedStyle,
+  useSharedValue,
+  withSequence,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 
 const API_BASE = 'http://192.168.0.33:8080';
 const WS_BASE = 'ws://192.168.0.33:8080/ws';
+
+// 토스 팔레트 (detail.tsx와 통일)
+const COLOR_TEXT = '#191f28';
+const COLOR_SUBTLE = '#8b95a1';
+const COLOR_BG = '#f2f4f6';
+const COLOR_CARD = '#ffffff';
+const COLOR_BULL = '#f04452'; // 상승 = 빨강 (한국 관례)
+const COLOR_BEAR = '#3182f6'; // 하락 = 파랑
+const COLOR_BORDER = '#e5e8eb';
+
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+
+const haptic = () => {
+  if (Platform.OS !== 'web') {
+    Haptics.selectionAsync().catch(() => {});
+  }
+};
 
 interface Member {
   id: number;
@@ -24,6 +54,121 @@ interface Member {
 interface SearchResult {
   description: string;
   symbol: string;
+}
+
+// 천 단위 구분 + 소수점 2자리
+const formatPrice = (n: number) => {
+  const [intPart, decPart] = n.toFixed(2).split('.');
+  return `${intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}.${decPart}`;
+};
+
+// 관심 종목 행: 가격 변동 시 빨강/파랑으로 깜빡이고, 누르면 살짝 눌린다.
+function WatchRow({
+  symbol,
+  price,
+  prevPrice,
+  index,
+  onPress,
+  onRemove,
+}: {
+  symbol: string;
+  price?: number;
+  prevPrice?: number;
+  index: number;
+  onPress: () => void;
+  onRemove: () => void;
+}) {
+  const flash = useSharedValue(0);
+  const scale = useSharedValue(1);
+
+  const changed = price !== undefined && prevPrice !== undefined && price !== prevPrice;
+  const up = changed ? price! >= prevPrice! : true;
+
+  // 가격이 바뀔 때마다 배경을 잠깐 물들였다 되돌린다.
+  useEffect(() => {
+    if (changed) {
+      flash.value = withSequence(
+        withTiming(1, { duration: 120 }),
+        withTiming(0, { duration: 650 })
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [price]);
+
+  const cardStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+    backgroundColor: interpolateColor(
+      flash.value,
+      [0, 1],
+      [COLOR_CARD, up ? '#fdecee' : '#eaf2fe']
+    ),
+  }));
+
+  const priceColor =
+    price !== undefined && prevPrice !== undefined
+      ? price > prevPrice
+        ? COLOR_BULL
+        : price < prevPrice
+        ? COLOR_BEAR
+        : COLOR_TEXT
+      : COLOR_TEXT;
+
+  return (
+    <Animated.View
+      entering={FadeInDown.delay(Math.min(index, 8) * 55)
+        .springify()
+        .damping(18)}
+      exiting={FadeOut.duration(180)}
+      layout={LinearTransition.springify().damping(20)}
+    >
+      <AnimatedPressable
+        style={[styles.item, cardStyle]}
+        onPress={onPress}
+        onPressIn={() => {
+          haptic();
+          scale.value = withSpring(0.97, { damping: 18, stiffness: 320 });
+        }}
+        onPressOut={() => {
+          scale.value = withSpring(1, { damping: 16, stiffness: 280 });
+        }}
+      >
+        <View style={styles.itemLeft}>
+          <View style={styles.avatar}>
+            <Text style={styles.avatarText}>{symbol.slice(0, 2)}</Text>
+          </View>
+          <View>
+            <Text style={styles.symbol}>{symbol}</Text>
+            <Text style={styles.symbolSub}>실시간</Text>
+          </View>
+        </View>
+
+        <View style={styles.itemRight}>
+          {price !== undefined ? (
+            <View style={{ alignItems: 'flex-end' }}>
+              <Text style={[styles.price, { color: priceColor }]}>
+                {formatPrice(price)}
+              </Text>
+              <Text style={styles.currency}>USD</Text>
+            </View>
+          ) : (
+            <ActivityIndicator size="small" color={COLOR_SUBTLE} />
+          )}
+
+          <Pressable
+            onPress={(e) => {
+              e.stopPropagation?.();
+              haptic();
+              onRemove();
+            }}
+            hitSlop={10}
+            style={styles.removeBtn}
+          >
+            <Ionicons name="close" size={16} color={COLOR_SUBTLE} />
+          </Pressable>
+        </View>
+      </AnimatedPressable>
+    </Animated.View>
+  );
 }
 
 export default function Home() {
@@ -41,8 +186,19 @@ export default function Home() {
   // 검색
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [focused, setFocused] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
+
+  // 검색창 포커스 시 테두리 강조
+  const focusAnim = useSharedValue(0);
+  const searchBoxStyle = useAnimatedStyle(() => ({
+    borderColor: interpolateColor(
+      focusAnim.value,
+      [0, 1],
+      [COLOR_BORDER, COLOR_BEAR]
+    ),
+  }));
 
   useEffect(() => {
     initializeData();
@@ -115,27 +271,27 @@ export default function Home() {
       connectWebSocket(symbols);
     }
   };
+
   const fetchInitialPrices = async (symbols: string[]) => {
     if (symbols.length === 0) return;
-    
+
     try {
       const res = await fetch(
         `${API_BASE}/stock/latest-prices?symbols=${symbols.join(',')}`,
         { credentials: 'include' }
       );
-      
+
       if (res.ok) {
-        const initialPrices = await res.json(); 
-        setPrices(prev => ({
+        const initialPrices = await res.json();
+        setPrices((prev) => ({
           ...prev,
-          ...initialPrices
+          ...initialPrices,
         }));
       }
     } catch (e) {
-      console.error("초기 가격을 불러오는데 실패했습니다.", e);
+      console.error('초기 가격을 불러오는데 실패했습니다.', e);
     }
   };
-
 
   const connectWebSocket = (symbols: string[]) => {
     wsRef.current?.close();
@@ -152,7 +308,7 @@ export default function Home() {
         const data = JSON.parse(event.data);
 
         if (data.type === 'PRICE') {
-          setPrices(prev => {
+          setPrices((prev) => {
             setPrevPrices(prev); // 이전값 저장
             return {
               ...prev,
@@ -181,12 +337,15 @@ export default function Home() {
     });
 
     if (res.ok) {
-      setWatchlist(prev => [...prev, symbol]);
+      if (Platform.OS !== 'web') {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
+          () => {}
+        );
+      }
+      setWatchlist((prev) => [...prev, symbol]);
       await fetchInitialPrices([symbol]); // 새로 추가된 종목의 가격도 불러오기
 
-      wsRef.current?.send(
-        JSON.stringify({ type: 'ADD', symbol })
-      );
+      wsRef.current?.send(JSON.stringify({ type: 'ADD', symbol }));
     }
   };
 
@@ -197,17 +356,15 @@ export default function Home() {
     });
 
     if (res.ok) {
-      setWatchlist(prev => prev.filter(s => s !== symbol));
+      setWatchlist((prev) => prev.filter((s) => s !== symbol));
 
-      setPrices(prev => {
+      setPrices((prev) => {
         const copy = { ...prev };
         delete copy[symbol];
         return copy;
       });
 
-      wsRef.current?.send(
-        JSON.stringify({ type: 'REMOVE', symbol })
-      );
+      wsRef.current?.send(JSON.stringify({ type: 'REMOVE', symbol }));
     }
   };
 
@@ -225,7 +382,7 @@ export default function Home() {
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" />
+        <ActivityIndicator size="large" color={COLOR_BEAR} />
       </View>
     );
   }
@@ -233,119 +390,120 @@ export default function Home() {
   return (
     <View style={styles.container}>
       {/* 헤더 */}
-      <View style={styles.header}>
-        <Text style={styles.title}>
-          {member?.memberName}님의 관심 종목
-        </Text>
-        <TouchableOpacity onPress={handleLogout}>
-          <Text style={{ color: 'red' }}>로그아웃</Text>
-        </TouchableOpacity>
-      </View>
+      <Animated.View
+        entering={FadeInDown.duration(420).springify().damping(18)}
+        style={styles.header}
+      >
+        <View>
+          <Text style={styles.greeting}>안녕하세요</Text>
+          <Text style={styles.title}>
+            {member?.memberName ?? ''}님의 관심 종목
+          </Text>
+        </View>
+        <Pressable onPress={handleLogout} hitSlop={8} style={styles.logoutBtn}>
+          <Ionicons name="log-out-outline" size={20} color={COLOR_SUBTLE} />
+        </Pressable>
+      </Animated.View>
 
       {/* 검색 */}
-      <View style={styles.searchBox}>
+      <Animated.View
+        entering={FadeInDown.delay(80).duration(420).springify().damping(18)}
+        style={[styles.searchBox, searchBoxStyle]}
+      >
         <Ionicons
           name="search"
           size={20}
-          color="#999"
+          color={focused ? COLOR_BEAR : COLOR_SUBTLE}
           style={styles.searchIcon}
         />
         <TextInput
           value={newSymbol}
           onChangeText={setNewSymbol}
+          onFocus={() => {
+            setFocused(true);
+            focusAnim.value = withTiming(1, { duration: 180 });
+          }}
+          onBlur={() => {
+            setFocused(false);
+            focusAnim.value = withTiming(0, { duration: 180 });
+          }}
           placeholder="종목 검색 (예: AAPL)"
-          placeholderTextColor="#999"
+          placeholderTextColor={COLOR_SUBTLE}
           autoCapitalize="characters"
           autoCorrect={false}
           returnKeyType="search"
           style={styles.input}
         />
-        {newSymbol.length > 0 && (
-          <TouchableOpacity
-            onPress={() => setNewSymbol('')}
-            hitSlop={8}
-          >
-            <Ionicons name="close-circle" size={20} color="#bbb" />
-          </TouchableOpacity>
-        )}
-        {isSearching && (
-          <ActivityIndicator size="small" style={styles.searchSpinner} />
-        )}
-      </View>
+        {isSearching ? (
+          <ActivityIndicator size="small" color={COLOR_SUBTLE} />
+        ) : newSymbol.length > 0 ? (
+          <Pressable onPress={() => setNewSymbol('')} hitSlop={8}>
+            <Ionicons name="close-circle" size={20} color="#c4ccd4" />
+          </Pressable>
+        ) : null}
+      </Animated.View>
 
       {searchResults.length > 0 && (
-        <View style={styles.dropdown}>
-          <FlatList
-            data={searchResults}
-            keyExtractor={(item) => item.symbol}
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={styles.dropdownItem}
-                onPress={() =>
-                  handleSelectAndAddSymbol(item.symbol)
-                }
+        <Animated.View
+          entering={FadeIn.duration(160)}
+          exiting={FadeOut.duration(120)}
+          style={styles.dropdown}
+        >
+          {searchResults.slice(0, 6).map((item, i) => (
+            <Animated.View
+              key={item.symbol}
+              entering={FadeInDown.delay(i * 35).duration(220)}
+            >
+              <Pressable
+                style={({ pressed }) => [
+                  styles.dropdownItem,
+                  pressed && { backgroundColor: COLOR_BG },
+                ]}
+                onPress={() => handleSelectAndAddSymbol(item.symbol)}
               >
-                <Text>{item.symbol}</Text>
-                <Text style={{ color: '#888' }}>
+                <Text style={styles.dropdownSymbol}>{item.symbol}</Text>
+                <Text style={styles.dropdownDesc} numberOfLines={1}>
                   {item.description}
                 </Text>
-              </TouchableOpacity>
-            )}
-          />
-        </View>
+              </Pressable>
+            </Animated.View>
+          ))}
+        </Animated.View>
       )}
 
       {/* 리스트 */}
-      <FlatList
+      <Animated.FlatList
         data={watchlist}
         keyExtractor={(item) => item}
-        renderItem={({ item }) => {
-          const price = prices[item];
-          const prev = prevPrices[item];
-
-          const color =
-            prev !== undefined
-              ? price > prev
-                ? '#ff4d4f'
-                : '#1890ff'
-              : '#333';
-
-          return (
-            <View style={styles.item}>
-              {/* 왼쪽 클릭 영역 */}
-              <TouchableOpacity
-                style={{ flex: 1 }}
-                activeOpacity={0.7}
-                onPress={() =>
-                  router.push({
-                    pathname: '/detail',
-                    params: { 
-                      symbol: item, 
-                      initialPrice : price
-                    },
-                  })
-                }
-              >
-                <Text style={styles.symbol}>{item}</Text>
-
-                {price !== undefined ? (
-                  <Text style={{ color }}>
-                    {price.toFixed(2)} USD
-                  </Text>
-                ) : (
-                  <ActivityIndicator size="small" />
-                )}
-              </TouchableOpacity>
-
-              {/* 삭제 버튼 */}
-              <TouchableOpacity
-                onPress={() => handleRemoveSymbol(item)}
-              >
-                <Text style={{ color: 'red' }}>삭제</Text>
-              </TouchableOpacity>
-            </View>
-          );
-        }}
+        contentContainerStyle={styles.listContent}
+        showsVerticalScrollIndicator={false}
+        itemLayoutAnimation={LinearTransition.springify().damping(20)}
+        keyboardShouldPersistTaps="handled"
+        ListEmptyComponent={
+          <Animated.View
+            entering={FadeIn.delay(150).duration(400)}
+            style={styles.empty}
+          >
+            <Ionicons name="star-outline" size={40} color="#c4ccd4" />
+            <Text style={styles.emptyText}>아직 관심 종목이 없어요</Text>
+            <Text style={styles.emptySub}>위에서 종목을 검색해 추가해보세요</Text>
+          </Animated.View>
+        }
+        renderItem={({ item, index }) => (
+          <WatchRow
+            symbol={item}
+            price={prices[item]}
+            prevPrice={prevPrices[item]}
+            index={index}
+            onPress={() =>
+              router.push({
+                pathname: '/detail',
+                params: { symbol: item, initialPrice: prices[item] },
+              })
+            }
+            onRemove={() => handleRemoveSymbol(item)}
+          />
+        )}
       />
     </View>
   );
@@ -354,72 +512,171 @@ export default function Home() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 20,
+    paddingHorizontal: 20,
     paddingTop: 60,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: COLOR_BG,
   },
   center: {
     flex: 1,
     justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: COLOR_BG,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'center',
     marginBottom: 20,
   },
+  greeting: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLOR_SUBTLE,
+    marginBottom: 2,
+  },
   title: {
-    fontSize: 18,
-    fontWeight: 'bold',
+    fontSize: 22,
+    fontWeight: '800',
+    color: COLOR_TEXT,
+    letterSpacing: -0.5,
+  },
+  logoutBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLOR_CARD,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   searchBox: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#fff',
-    paddingHorizontal: 12,
-    height: 48,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 3,
-    elevation: 2,
+    backgroundColor: COLOR_CARD,
+    paddingHorizontal: 14,
+    height: 50,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: COLOR_BORDER,
   },
   searchIcon: {
     marginRight: 8,
   },
-  searchSpinner: {
-    marginLeft: 8,
-  },
   input: {
     flex: 1,
     fontSize: 16,
-    color: '#222',
+    color: COLOR_TEXT,
     paddingVertical: 0,
   },
   dropdown: {
-    backgroundColor: '#fff',
-    marginTop: 5,
-    borderRadius: 8,
-    maxHeight: 200,
+    backgroundColor: COLOR_CARD,
+    marginTop: 8,
+    borderRadius: 14,
+    paddingVertical: 4,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 4,
   },
   dropdownItem: {
-    padding: 10,
-    borderBottomWidth: 1,
-    borderColor: '#eee',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  dropdownSymbol: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: COLOR_TEXT,
+  },
+  dropdownDesc: {
+    flex: 1,
+    fontSize: 13,
+    color: COLOR_SUBTLE,
+  },
+  listContent: {
+    paddingTop: 12,
+    paddingBottom: 40,
+    gap: 10,
   },
   item: {
     flexDirection: 'row',
-    backgroundColor: '#fff',
-    padding: 15,
-    borderRadius: 10,
-    marginTop: 10,
+    backgroundColor: COLOR_CARD,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'space-between',
   },
+  itemLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  avatar: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: COLOR_BG,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#4e5968',
+  },
   symbol: {
     fontSize: 16,
-    fontWeight: 'bold',
+    fontWeight: '800',
+    color: COLOR_TEXT,
+    letterSpacing: -0.3,
+  },
+  symbolSub: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLOR_SUBTLE,
+    marginTop: 1,
+  },
+  itemRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  price: {
+    fontSize: 16,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+  },
+  currency: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLOR_SUBTLE,
+    marginTop: 1,
+  },
+  removeBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: COLOR_BG,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  empty: {
+    alignItems: 'center',
+    paddingTop: 80,
+    gap: 8,
+  },
+  emptyText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#4e5968',
+    marginTop: 8,
+  },
+  emptySub: {
+    fontSize: 13,
+    color: COLOR_SUBTLE,
   },
 });

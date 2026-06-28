@@ -1,16 +1,66 @@
 import { useLocalSearchParams } from "expo-router";
+import * as Haptics from "expo-haptics";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Dimensions,
+  Platform,
+  Pressable,
   StyleSheet,
   Text,
-  TouchableOpacity,
   View,
 } from "react-native";
+import Animated, {
+  FadeIn,
+  FadeInDown,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from "react-native-reanimated";
 
 import { LineChart } from "react-native-wagmi-charts";
 import Svg, { Line } from "react-native-svg";
+
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+
+const haptic = () => {
+  if (Platform.OS !== "web") {
+    Haptics.selectionAsync().catch(() => {});
+  }
+};
+
+// 기간 탭: 누르면 살짝 줄었다 돌아오고, 활성 시 토스식 pill 배경
+function PeriodTab({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  const scale = useSharedValue(1);
+  const animStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
+  return (
+    <AnimatedPressable
+      style={[styles.tab, active && styles.activeTab, animStyle]}
+      onPressIn={() => {
+        scale.value = withSpring(0.92, { damping: 18, stiffness: 340 });
+      }}
+      onPressOut={() => {
+        scale.value = withSpring(1, { damping: 15, stiffness: 280 });
+      }}
+      onPress={() => {
+        haptic();
+        onPress();
+      }}
+    >
+      <Text style={[styles.tabText, active && styles.activeTabText]}>{label}</Text>
+    </AnimatedPressable>
+  );
+}
 
 // 본인의 서버 주소에 맞게 수정하세요.
 const API_BASE = "http://192.168.0.33:8080";
@@ -438,9 +488,14 @@ export default function Detail() {
   return (
     <View style={styles.container}>
       {/* 헤더: 종목 / 현재가(또는 스크럽 시점가) / 등락(또는 시점) — 토스 스타일 */}
-      <Text style={styles.symbol}>{symbolParam}</Text>
+      <Animated.Text
+        entering={FadeInDown.duration(400).springify().damping(18)}
+        style={styles.symbol}
+      >
+        {symbolParam}
+      </Animated.Text>
       {headerPrice !== null ? (
-        <>
+        <Animated.View entering={FadeInDown.delay(60).duration(400).springify().damping(18)}>
           <View style={styles.priceRow}>
             <Text style={styles.bigPrice}>{formatPrice(headerPrice)}</Text>
             <Text style={styles.currency}>USD</Text>
@@ -455,7 +510,7 @@ export default function Detail() {
               {changePct.toFixed(2)}%) · {resolutionLabel}
             </Text>
           )}
-        </>
+        </Animated.View>
       ) : (
         <Text style={styles.loadingPrice}>로딩중...</Text>
       )}
@@ -466,7 +521,7 @@ export default function Detail() {
           <ActivityIndicator size="large" color={COLOR_SUBTLE} />
         </View>
       ) : validData.length > 0 ? (
-        <View style={styles.chartCard}>
+        <Animated.View entering={FadeIn.delay(120).duration(450)} style={styles.chartCard}>
           <View style={{ width: SCREEN_WIDTH, height: CHART_HEIGHT, overflow: "hidden" }}>
             <LineChart.Provider
               data={lineData}
@@ -496,7 +551,7 @@ export default function Detail() {
             {/* 스크럽 세로 가이드 */}
             {renderScrubOverlay()}
           </View>
-        </View>
+        </Animated.View>
       ) : (
         <View style={styles.emptyBox}>
           <Text style={{ color: COLOR_SUBTLE }}>데이터가 없습니다.</Text>
@@ -505,21 +560,14 @@ export default function Detail() {
 
       {/* 기간 선택 (토스 스타일 pill) */}
       <View style={styles.tabContainer}>
-        {resolutions.map((r) => {
-          const active = resolution === r.value;
-          return (
-            <TouchableOpacity
-              key={r.value}
-              style={[styles.tab, active && styles.activeTab]}
-              onPress={() => setResolution(r.value as any)}
-              activeOpacity={0.7}
-            >
-              <Text style={[styles.tabText, active && styles.activeTabText]}>
-                {r.label}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
+        {resolutions.map((r) => (
+          <PeriodTab
+            key={r.value}
+            label={r.label}
+            active={resolution === r.value}
+            onPress={() => setResolution(r.value as any)}
+          />
+        ))}
       </View>
     </View>
   );
