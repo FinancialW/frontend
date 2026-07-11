@@ -245,8 +245,8 @@ const HELP_SECTIONS: HelpSection[] = [
     ],
   },
   {
-    title: "최고·최저·현재선",
-    body: "차트의 회색 가로선은 기간 내 최고가와 최저가 위치예요. 색이 들어간 가로선과 배지는 지금 가격(현재가)을 가리켜요.",
+    title: "최고·최저선",
+    body: "차트의 회색 가로선은 기간 내 최고가와 최저가 위치예요. 지금 가격(현재가)은 화면 위쪽의 큰 숫자로 확인할 수 있어요.",
   },
   {
     title: "이동평균선(MA)",
@@ -646,20 +646,13 @@ export default function Detail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ma5, ma20, validData.length, domainMin, domainSpan]);
 
-  // 🔥 최고점 / 최저점 / 현재점 가로선 + 라벨 (토스 스타일)
+  // 🔥 최고점 / 최저점 가로선 + 라벨 (토스 스타일)
+  // 현재가는 헤더의 큰 숫자로 이미 보여주므로 차트에는 표시하지 않는다 (선·배지 모두 제거).
   const renderPriceMarkers = () => {
     if (!validData.length || dataRange < 0) return null;
 
     const highY = yFor(dataHigh);
     const lowY = yFor(dataLow);
-    const curY = lastPrice !== null ? yFor(lastPrice) : null;
-
-    // 라벨 위치(겹침 회피): 현재가가 최고/최저에 붙으면 반대편으로 비킨다.
-    let curTop = curY !== null ? curY - 10 : 0;
-    if (curY !== null) {
-      if (curY <= highY + 24) curTop = curY + 4; // 최고 근처 → 선 아래
-      else if (curY >= lowY - 24) curTop = curY - 24; // 최저 근처 → 선 위
-    }
 
     return (
       <View style={StyleSheet.absoluteFill} pointerEvents="none">
@@ -676,16 +669,6 @@ export default function Detail() {
           <Text style={[styles.markerLabel, { color: COLOR_SUBTLE }]}>최저 </Text>
           <Text style={[styles.markerValue, { color: COLOR_TEXT }]}>{formatPrice(dataLow)}</Text>
         </View>
-
-        {/* 현재점 */}
-        {curY !== null && lastPrice !== null && (
-          <>
-            <View style={[styles.markerLine, { top: curY, height: 1.5, backgroundColor: accentColor, opacity: 0.7 }]} />
-            <View style={[styles.markerBadge, styles.currentBadge, { top: curTop, backgroundColor: accentColor }]}>
-              <Text style={styles.currentBadgeText}>{formatPrice(lastPrice)}</Text>
-            </View>
-          </>
-        )}
       </View>
     );
   };
@@ -1197,15 +1180,6 @@ const styles = StyleSheet.create({
   markerValue: {
     fontSize: 12,
     fontWeight: "700",
-  },
-  currentBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-  },
-  currentBadgeText: {
-    fontSize: 13,
-    fontWeight: "800",
-    color: "#fff",
   },
   // 기간 탭
   tabContainer: {
