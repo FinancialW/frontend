@@ -4,6 +4,7 @@ import * as Haptics from "expo-haptics";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  AppState,
   Dimensions,
   Modal,
   Platform,
@@ -23,8 +24,11 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { LineChart } from "react-native-wagmi-charts";
 import Svg, { Line, Polyline } from "react-native-svg";
+
+import { API_BASE, WS_BASE } from "@/constants/config";
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -67,9 +71,49 @@ function PeriodTab({
   );
 }
 
-// 본인의 서버 주소에 맞게 수정하세요.
-const API_BASE = "http://192.168.0.33:8080";
-const WS_BASE = "ws://192.168.0.33:8080/ws";
+// 차트 오버레이 토글(MA/지지저항/추세선)의 마지막 설정 저장 키
+const TOGGLES_STORAGE_KEY = "chart.lineToggles.v1";
+
+// 차트 오버레이 토글 칩: 켜짐 = 연회색 pill 채움, 꺼짐 = 테두리만 + 흐리게
+function LegendToggle({
+  label,
+  active,
+  onPress,
+  icon,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+  icon: React.ReactNode;
+}) {
+  const scale = useSharedValue(1);
+  const animStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
+  return (
+    <AnimatedPressable
+      style={[styles.toggleChip, active ? styles.toggleChipOn : styles.toggleChipOff, animStyle]}
+      onPressIn={() => {
+        scale.value = withSpring(0.94, { damping: 18, stiffness: 340 });
+      }}
+      onPressOut={() => {
+        scale.value = withSpring(1, { damping: 15, stiffness: 280 });
+      }}
+      onPress={() => {
+        haptic();
+        onPress();
+      }}
+      accessibilityRole="switch"
+      accessibilityState={{ checked: active }}
+      accessibilityLabel={`${label} 표시 켜고 끄기`}
+    >
+      <View style={{ opacity: active ? 1 : 0.35 }}>{icon}</View>
+      <Text style={[styles.toggleChipText, !active && styles.toggleChipTextOff]}>
+        {label}
+      </Text>
+    </AnimatedPressable>
+  );
+}
 
 type Candle = {
   timestamp: number;
@@ -85,6 +129,20 @@ type SupportResistanceZone = {
   bottomPrice: number;
   topPrice: number;
   touchCount: number;
+};
+
+// 대각선 추세선 (/support-resistance/analysis 응답의 trendLines)
+// slope 는 "캔들 1개당 가격 변화량"(인덱스 기준)이고, timestamp 는 초 단위다.
+type TrendLine = {
+  type: "SUPPORT" | "RESISTANCE";
+  slope: number;
+  startTimestamp: number;
+  startPrice: number;
+  endTimestamp: number;
+  endPrice: number;
+  currentProjectedPrice: number;
+  touchCount: number;
+  strength: number;
 };
 
 const getIntervalMs = (resolution: string) => {
@@ -200,11 +258,19 @@ const HELP_SECTIONS: HelpSection[] = [
   },
   {
     title: "지지선과 저항선",
-    body: "회색 띠는 가격이 자주 머물렀던 구간이에요. 띠 위쪽의 빨강 점선은 저항(천장)으로 뚫고 오르면 상승 신호가 될 수 있고, 아래쪽 파랑 점선은 지지(바닥)로 깨고 내려가면 하락 신호가 될 수 있는 가격대예요.",
+    body: "회색 띠는 가격이 자주 머물렀던 구간이에요. 띠 위쪽의 빨강 점선은 저항(천장)으로 뚫고 오르면 상승 신호가 될 수 있고, 아래쪽 파랑 점선은 지지(바닥)로 깨고 내려가면 하락 신호가 될 수 있는 가격대예요. 차트 위 범례를 눌러 끄고 켤 수 있어요.",
     legend: [
       { kind: "dash", color: COLOR_BULL, text: "저항(천장)" },
       { kind: "dash", color: COLOR_BEAR, text: "지지(바닥)" },
       { kind: "band", text: "가격 구간" },
+    ],
+  },
+  {
+    title: "추세선",
+    body: "저점끼리 또는 고점끼리 일직선으로 늘어선 지점을 이은 대각선이에요. 파랑 점선(지지 추세선)은 가격이 내려올 때마다 반등했던 흐름을, 빨강 점선(저항 추세선)은 오를 때마다 막혔던 흐름을 보여줘요. 가격이 이 선을 뚫으면 추세가 바뀌는 신호일 수 있어요. 선 오른쪽 라벨의 가격은 추세선을 오늘까지 연장했을 때의 값이에요. 차트 위 범례를 눌러 끄고 켤 수 있어요.",
+    legend: [
+      { kind: "dash", color: COLOR_BEAR, text: "지지 추세선" },
+      { kind: "dash", color: COLOR_BULL, text: "저항 추세선" },
     ],
   },
 ];
@@ -228,6 +294,7 @@ export default function Detail() {
 
   const [data, setData] = useState<Candle[]>([]);
   const [zones, setZones] = useState<SupportResistanceZone[]>([]);
+  const [trendLines, setTrendLines] = useState<TrendLine[]>([]);
 
   const [loading, setLoading] = useState(false);
   const [currentPrice, setCurrentPrice] = useState<number | null>(parsedInitialPrice);
@@ -242,6 +309,37 @@ export default function Detail() {
   // 이동평균선(MA) 표시 토글
   const [showMA5, setShowMA5] = useState(true);
   const [showMA20, setShowMA20] = useState(true);
+  // 지지/저항 존·추세선 표시 여부 (선이 많아 가독성이 떨어질 때 끌 수 있게)
+  const [showSR, setShowSR] = useState(true);
+  const [showTrend, setShowTrend] = useState(true);
+
+  // 마지막 토글 설정 복원 → 이후 변경될 때마다 저장.
+  // 복원이 끝나기 전에는 저장하지 않는다 (기본값으로 덮어쓰는 것 방지).
+  const togglesLoaded = useRef(false);
+
+  useEffect(() => {
+    AsyncStorage.getItem(TOGGLES_STORAGE_KEY)
+      .then((raw) => {
+        if (!raw) return;
+        const saved = JSON.parse(raw);
+        if (typeof saved.ma5 === "boolean") setShowMA5(saved.ma5);
+        if (typeof saved.ma20 === "boolean") setShowMA20(saved.ma20);
+        if (typeof saved.sr === "boolean") setShowSR(saved.sr);
+        if (typeof saved.trend === "boolean") setShowTrend(saved.trend);
+      })
+      .catch(() => {})
+      .finally(() => {
+        togglesLoaded.current = true;
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!togglesLoaded.current) return;
+    AsyncStorage.setItem(
+      TOGGLES_STORAGE_KEY,
+      JSON.stringify({ ma5: showMA5, ma20: showMA20, sr: showSR, trend: showTrend })
+    ).catch(() => {});
+  }, [showMA5, showMA20, showSR, showTrend]);
 
   // 도움말 바텀시트 상태/애니메이션 공유값
   const [helpVisible, setHelpVisible] = useState(false);
@@ -287,7 +385,8 @@ export default function Detail() {
 
     try {
       const res = await fetch(
-        `${API_BASE}/candles?symbol=${symbolParam}&resolution=${resolution}`
+        `${API_BASE}/candles?symbol=${symbolParam}&resolution=${resolution}`,
+        { credentials: "include" }
       );
       const json = await res.json();
 
@@ -338,16 +437,24 @@ export default function Detail() {
   const fetchZones = async () => {
     if (!symbolParam) return;
     try {
+      // /analysis 는 지지/저항 존(levels)에 더해 대각선 추세선(trendLines)까지 내려준다.
       const res = await fetch(
-        `${API_BASE}/support-resistance?symbol=${symbolParam}&resolution=${resolution}`
+        `${API_BASE}/support-resistance/analysis?symbol=${symbolParam}&resolution=${resolution}`,
+        { credentials: "include" }
       );
       const json = await res.json();
-      // 백엔드가 배열을 바로 주지 않고 감싸는 경우까지 방어한다.
+      // 백엔드가 배열을 바로 주는 구버전 응답까지 방어한다.
       const list: SupportResistanceZone[] = Array.isArray(json)
         ? json
-        : json?.zones ?? json?.data ?? [];
-      console.log(`[지지/저항] ${symbolParam} ${resolution}: ${list.length}개`, list);
+        : json?.levels ?? json?.zones ?? json?.data ?? [];
+      const lines: TrendLine[] = Array.isArray(json?.trendLines)
+        ? json.trendLines
+        : [];
+      console.log(
+        `[지지/저항] ${symbolParam} ${resolution}: 존 ${list.length}개, 추세선 ${lines.length}개`
+      );
       setZones(list);
+      setTrendLines(lines);
     } catch (e) {
       console.error("지지/저항선 데이터 불러오기 실패:", e);
     }
@@ -370,33 +477,49 @@ export default function Detail() {
   useEffect(() => {
     if (!symbolParam) return;
 
-    const ws = new WebSocket(WS_BASE);
-    wsRef.current = ws;
+    const connect = () => {
+      const ws = new WebSocket(WS_BASE);
+      wsRef.current = ws;
 
-    ws.onopen = () => {
-      ws.send(
-        JSON.stringify({
-          type: "ENTER",
-          symbols: [symbolParam],
-        })
-      );
-    };
+      ws.onopen = () => {
+        ws.send(
+          JSON.stringify({
+            type: "ENTER",
+            symbols: [symbolParam],
+          })
+        );
+      };
 
-    ws.onmessage = (event) => {
-      try {
-        const parsedData = JSON.parse(event.data);
-        if (parsedData.type === "PRICE") {
-          const price = parseFloat(parsedData.price);
-          // 비정상(NaN) 가격은 무시한다 — 헤더 등락/차트가 'NaN'으로 오염되지 않게.
-          if (Number.isFinite(price)) {
-            setCurrentPrice(price);
-            updateLastCandle(price);
+      ws.onmessage = (event) => {
+        try {
+          const parsedData = JSON.parse(event.data);
+          if (parsedData.type === "PRICE") {
+            const price = parseFloat(parsedData.price);
+            // 비정상(NaN) 가격은 무시한다 — 헤더 등락/차트가 'NaN'으로 오염되지 않게.
+            if (Number.isFinite(price)) {
+              setCurrentPrice(price);
+              updateLastCandle(price);
+            }
           }
-        }
-      } catch {}
+        } catch {}
+      };
     };
 
-    return () => ws.close();
+    connect();
+
+    // 백그라운드에서 끊긴 소켓을 포그라운드 복귀 시 재연결한다.
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state !== "active") return;
+      const ws = wsRef.current;
+      const closed =
+        !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
+      if (closed) connect();
+    });
+
+    return () => {
+      sub.remove();
+      wsRef.current?.close();
+    };
   }, [symbolParam, updateLastCandle]);
 
   const resolutions = [
@@ -569,7 +692,7 @@ export default function Detail() {
 
   // 지지/저항 — 존(밴드)으로 표현. 상단 경계=저항(뚫으면 상승/빨강), 하단 경계=지지(뚫으면 하락/파랑)
   const renderSupportResistanceZones = () => {
-    if (!validData.length || !zones.length) return null;
+    if (!showSR || !validData.length || !zones.length) return null;
 
     // 1. 라벨 데이터 수집: 존마다 상단(저항)·하단(지지) 두 개씩.
     const labelsData = zones.flatMap((zone, index) => [
@@ -626,6 +749,84 @@ export default function Detail() {
           <View key={label.id} style={[styles.srLabel, { top: label.y - 9 }]}>
             <Text style={[styles.srRole, { color: label.color }]}>{label.role}</Text>
             <Text style={styles.srPrice}>{formatPrice(label.price)}</Text>
+          </View>
+        ))}
+      </View>
+    );
+  };
+
+  // 대각선 추세선 — 시작 피벗과 현재 투영가(마지막 봉)를 잇는 직선.
+  // 백엔드 slope 는 1Y 일봉의 '캔들 인덱스당' 기울기라, 같은 좌표계(인덱스 기반 x)에 그대로 그린다.
+  // 시작점이 보이는 구간 밖(다른 기간 탭)이면 화면 왼쪽 끝에서 시간 보간한 가격으로 잘라 그린다.
+  const renderTrendLines = () => {
+    if (!showTrend || !validData.length || !trendLines.length) return null;
+
+    const denom = Math.max(validData.length - 1, 1);
+    const firstTs = validData[0].timestamp;
+    const lastTs = validData[validData.length - 1].timestamp;
+
+    const segments = trendLines
+      .map((tl, index) => {
+        const startTs = tl.startTimestamp * 1000; // 초 → ms
+        if (lastTs <= startTs) return null; // 보이는 구간이 추세선 시작 이전이면 그리지 않음
+
+        // (startTs, startPrice) ~ (lastTs, currentProjectedPrice) 직선 위의 시간 보간 가격
+        const priceAt = (ts: number) =>
+          tl.startPrice +
+          ((tl.currentProjectedPrice - tl.startPrice) * (ts - startTs)) /
+            (lastTs - startTs);
+
+        let x1 = 0;
+        let y1 = yFor(priceAt(firstTs));
+        if (startTs >= firstTs) {
+          // 시작 피벗이 보이는 구간 안이면 해당 캔들 인덱스에 정확히 앵커링
+          let idx = validData.findIndex((d) => d.timestamp >= startTs);
+          if (idx < 0) idx = validData.length - 1;
+          x1 = (idx / denom) * SCREEN_WIDTH;
+          y1 = yFor(tl.startPrice);
+        }
+
+        const y2 = yFor(tl.currentProjectedPrice);
+        const color = tl.type === "RESISTANCE" ? COLOR_BULL : COLOR_BEAR;
+        const role = tl.type === "RESISTANCE" ? "저항 추세선" : "지지 추세선";
+        return { index, x1, y1, x2: SCREEN_WIDTH, y2, color, role, price: tl.currentProjectedPrice };
+      })
+      .filter((s): s is NonNullable<typeof s> => s !== null);
+
+    if (!segments.length) return null;
+
+    // 라벨(선 오른쪽 끝) 겹침 방지 — 지지/저항 라벨과 동일한 방식으로 아래로 밀어낸다.
+    const MIN_DISTANCE = 18;
+    const labels = segments
+      .map((s) => ({ ...s, labelY: s.y2 }))
+      .sort((a, b) => a.labelY - b.labelY);
+    for (let i = 1; i < labels.length; i++) {
+      if (labels[i].labelY - labels[i - 1].labelY < MIN_DISTANCE) {
+        labels[i].labelY = labels[i - 1].labelY + MIN_DISTANCE;
+      }
+    }
+
+    return (
+      <View style={StyleSheet.absoluteFill} pointerEvents="none">
+        <Svg width={SCREEN_WIDTH} height={CHART_HEIGHT}>
+          {segments.map((s) => (
+            <Line
+              key={`tl-${s.index}`}
+              x1={s.x1}
+              y1={s.y1}
+              x2={s.x2}
+              y2={s.y2}
+              stroke={s.color}
+              strokeWidth={1.5}
+              strokeDasharray="6 3"
+              opacity={0.85}
+            />
+          ))}
+        </Svg>
+        {labels.map((s) => (
+          <View key={`tl-label-${s.index}`} style={[styles.tlLabel, { top: s.labelY - 9 }]}>
+            <Text style={[styles.srRole, { color: s.color }]}>{s.role}</Text>
+            <Text style={styles.srPrice}>{formatPrice(s.price)}</Text>
           </View>
         ))}
       </View>
@@ -749,37 +950,40 @@ export default function Detail() {
         <Text style={styles.loadingPrice}>로딩중...</Text>
       )}
 
-      {/* 이동평균선 범례 + 토글 (누르면 해당 MA 선을 끄고 켠다) */}
+      {/* 오버레이 토글 칩 (누르면 해당 선을 끄고 켠다 — 마지막 설정은 저장됨) */}
       {validData.length > 0 && (
         <View style={styles.maLegend}>
-          <Pressable
-            style={styles.maLegendItem}
-            onPress={() => {
-              haptic();
-              setShowMA5((v) => !v);
-            }}
-            accessibilityRole="button"
-            accessibilityLabel="MA5 선 켜고 끄기"
-          >
-            <View
-              style={[styles.maDot, { backgroundColor: COLOR_MA5, opacity: showMA5 ? 1 : 0.35 }]}
-            />
-            <Text style={[styles.maLegendText, { opacity: showMA5 ? 1 : 0.35 }]}>MA5</Text>
-          </Pressable>
-          <Pressable
-            style={styles.maLegendItem}
-            onPress={() => {
-              haptic();
-              setShowMA20((v) => !v);
-            }}
-            accessibilityRole="button"
-            accessibilityLabel="MA20 선 켜고 끄기"
-          >
-            <View
-              style={[styles.maDot, { backgroundColor: COLOR_MA20, opacity: showMA20 ? 1 : 0.35 }]}
-            />
-            <Text style={[styles.maLegendText, { opacity: showMA20 ? 1 : 0.35 }]}>MA20</Text>
-          </Pressable>
+          <LegendToggle
+            label="MA5"
+            active={showMA5}
+            onPress={() => setShowMA5((v) => !v)}
+            icon={<View style={[styles.maDot, { backgroundColor: COLOR_MA5 }]} />}
+          />
+          <LegendToggle
+            label="MA20"
+            active={showMA20}
+            onPress={() => setShowMA20((v) => !v)}
+            icon={<View style={[styles.maDot, { backgroundColor: COLOR_MA20 }]} />}
+          />
+          <LegendToggle
+            label="지지/저항"
+            active={showSR}
+            onPress={() => setShowSR((v) => !v)}
+            icon={<View style={[styles.toggleDash, { backgroundColor: COLOR_SUBTLE }]} />}
+          />
+          <LegendToggle
+            label="추세선"
+            active={showTrend}
+            onPress={() => setShowTrend((v) => !v)}
+            icon={
+              <View
+                style={[
+                  styles.toggleDash,
+                  { backgroundColor: COLOR_SUBTLE, transform: [{ rotate: "-25deg" }] },
+                ]}
+              />
+            }
+          />
         </View>
       )}
 
@@ -814,6 +1018,8 @@ export default function Detail() {
             </LineChart.Provider>
             {/* 차트 위에 지지/저항선 렌더링 */}
             {renderSupportResistanceZones()}
+            {/* 대각선 추세선: SR 밴드 위, MA 아래 */}
+            {renderTrendLines()}
             {/* 이동평균선(MA): SR 밴드 위, 가격 마커 배지 아래 */}
             {renderMovingAverages()}
             {/* 최고/최저/현재 가로선 + 라벨 */}
@@ -1038,6 +1244,19 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     borderRadius: 6,
   },
+  // 추세선 라벨: srLabel과 동일하되 오른쪽 끝에 붙인다 (지지/저항 라벨과 좌우로 분리)
+  tlLabel: {
+    position: "absolute",
+    right: 4,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.92)",
+    borderWidth: 1,
+    borderColor: COLOR_LINE,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
   srRole: {
     fontSize: 10,
     fontWeight: "700",
@@ -1059,25 +1278,48 @@ const styles = StyleSheet.create({
   // 이동평균선 범례 + 토글
   maLegend: {
     flexDirection: "row",
-    gap: 12,
+    gap: 8,
     alignItems: "center",
+    flexWrap: "wrap",
     marginBottom: 12,
   },
-  maLegendItem: {
+  // 토글 칩: 켜짐 = 연회색 pill 채움, 꺼짐 = 테두리만
+  toggleChip: {
     flexDirection: "row",
     alignItems: "center",
     gap: 5,
-    paddingVertical: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  toggleChipOn: {
+    backgroundColor: COLOR_PILL_BG,
+    borderColor: "transparent",
+  },
+  toggleChipOff: {
+    backgroundColor: "transparent",
+    borderColor: COLOR_LINE,
+  },
+  toggleChipText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: COLOR_TEXT,
+  },
+  toggleChipTextOff: {
+    color: COLOR_SUBTLE,
+    opacity: 0.6,
   },
   maDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
   },
-  maLegendText: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: COLOR_SUBTLE,
+  // 지지/저항·추세선 토글용 짧은 선 모양 (추세선은 rotate로 기울인다)
+  toggleDash: {
+    width: 12,
+    height: 2,
+    borderRadius: 1,
   },
   // 도움말 모달 / 바텀시트
   modalBackdrop: {
