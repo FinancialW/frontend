@@ -9,7 +9,7 @@ import Animated, {
   withSpring,
 } from 'react-native-reanimated';
 
-const API_BASE = 'http://192.168.0.33:8080';
+import { API_BASE } from '@/constants/config';
 
 const COLOR_TEXT = '#191f28';
 const COLOR_SUBTLE = '#8b95a1';

@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   Keyboard,
   Platform,
   Pressable,
@@ -26,8 +27,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 
-const API_BASE = 'http://192.168.0.33:8080';
-const WS_BASE = 'ws://192.168.0.33:8080/ws';
+import { API_BASE, WS_BASE } from '@/constants/config';
 
 // 토스 팔레트 (detail.tsx와 통일)
 const COLOR_TEXT = '#191f28';
@@ -209,6 +209,17 @@ export default function Home() {
   const [focused, setFocused] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
+  // setState 업데이터 안에서 다른 setState를 호출하지 않도록, 최신 스냅샷을 ref로 유지한다.
+  const pricesRef = useRef<Record<string, number>>({});
+  const watchlistRef = useRef<string[]>([]);
+
+  useEffect(() => {
+    pricesRef.current = prices;
+  }, [prices]);
+
+  useEffect(() => {
+    watchlistRef.current = watchlist;
+  }, [watchlist]);
 
   // 검색창 포커스 시 테두리 강조
   const focusAnim = useSharedValue(0);
@@ -238,14 +249,19 @@ export default function Home() {
       setIsSearching(true);
       try {
         const res = await fetch(
-          `${API_BASE}/stock/search?q=${newSymbol.trim()}`,
+          `${API_BASE}/stock/search?q=${encodeURIComponent(newSymbol.trim())}`,
           { credentials: 'include' }
         );
 
         if (res.ok) {
           const data = await res.json();
-          const resultsArray = data.result || [];
-          setSearchResults(resultsArray);
+          const resultsArray: SearchResult[] = data.result || [];
+          // 같은 심볼이 증권 유형별로 중복해서 내려오는 경우가 있어 심볼 기준으로 중복 제거
+          // (key={item.symbol} 충돌 방지 + 드롭다운에 같은 항목이 두 줄 뜨는 것 방지)
+          const unique = Array.from(
+            new Map(resultsArray.map((r) => [r.symbol, r])).values()
+          );
+          setSearchResults(unique);
         }
       } catch (e) {
         console.error(e);
@@ -369,17 +385,40 @@ export default function Home() {
         const data = JSON.parse(event.data);
 
         if (data.type === 'PRICE') {
-          setPrices((prev) => {
-            setPrevPrices(prev); // 이전값 저장
-            return {
-              ...prev,
-              [data.symbol]: parseFloat(data.price),
-            };
-          });
+          const price = parseFloat(data.price);
+          if (!Number.isFinite(price)) return;
+
+          setPrevPrices(pricesRef.current); // 이전값 저장
+          setPrices((prev) => ({
+            ...prev,
+            [data.symbol]: price,
+          }));
         }
       } catch {}
     };
+
+    ws.onerror = () => {
+      console.log('WebSocket 연결 오류');
+    };
   };
+
+  // 네이티브에서는 앱이 백그라운드로 가면 소켓이 끊긴다.
+  // 포그라운드 복귀 시 소켓이 닫혀 있으면 재연결하고 가격도 새로 받아온다.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return;
+
+      const ws = wsRef.current;
+      const closed = !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
+      if (closed && watchlistRef.current.length > 0) {
+        fetchInitialPrices(watchlistRef.current);
+        connectWebSocket(watchlistRef.current);
+      }
+    });
+
+    return () => sub.remove();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ⭐️ 검색 선택
   const handleSelectAndAddSymbol = async (symbol: string) => {
@@ -392,7 +431,7 @@ export default function Home() {
       return;
     }
 
-    const res = await fetch(`${API_BASE}/watchlist?symbol=${symbol}`, {
+    const res = await fetch(`${API_BASE}/watchlist?symbol=${encodeURIComponent(symbol)}`, {
       method: 'POST',
       credentials: 'include',
     });
@@ -412,7 +451,7 @@ export default function Home() {
   };
 
   const handleRemoveSymbol = async (symbol: string) => {
-    const res = await fetch(`${API_BASE}/watchlist?symbol=${symbol}`, {
+    const res = await fetch(`${API_BASE}/watchlist?symbol=${encodeURIComponent(symbol)}`, {
       method: 'DELETE',
       credentials: 'include',
     });

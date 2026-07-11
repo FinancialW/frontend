@@ -27,16 +27,11 @@ npm run lint           # eslint (eslint-config-expo flat config)
 
 ## 백엔드 결합 (가장 중요)
 
-모든 화면이 백엔드 주소를 모듈 최상단 상수로 하드코딩하고 있다:
+백엔드 주소는 `constants/config.ts` 한 곳에서 관리한다. 값은 루트 `.env`의 `EXPO_PUBLIC_API_BASE`에서 읽고, `WS_BASE`는 `API_BASE`에서 파생된다(`http→ws` + `/ws`). **주소를 바꾸려면 `.env`만 수정하고 Metro를 재시작하면 된다** (`EXPO_PUBLIC_*` 변수는 번들 시점에 인라인됨). 네 화면 모두 `import { API_BASE, WS_BASE } from '@/constants/config'`로 가져다 쓴다.
 
-```ts
-const API_BASE = 'http://192.168.0.33:8080';
-const WS_BASE  = 'ws://192.168.0.33:8080/ws';
-```
+모든 인증 요청은 `fetch(..., { credentials: 'include' })`를 통한 쿠키 기반 인증을 사용한다. 코드에 베어러 토큰은 없다. 네이티브에서는 `webview.tsx`의 `sharedCookiesEnabled`가 카카오 로그인 쿠키를 앱의 fetch와 공유한다 — 제거하면 iOS에서 로그인 후에도 401이 난다.
 
-이 LAN IP가 `app/(tabs)/index.tsx`, `app/(tabs)/home.tsx`, `app/detail.tsx`, `app/(tabs)/webview.tsx`에 중복되어 있다. 백엔드 주소가 바뀌면 **네 파일을 모두 수정해야 한다.** 중앙 설정이나 환경 변수는 없다.
-
-모든 인증 요청은 `fetch(..., { credentials: 'include' })`를 통한 쿠키 기반 인증을 사용한다. 코드에 베어러 토큰은 없다.
+네이티브 빌드에서 `http://` 평문 통신은 `app.json`의 iOS `NSAllowsArbitraryLoads`와 `expo-build-properties`의 `usesCleartextTraffic`으로 허용해 둔 상태다 — **개발용 설정이며, 배포 시 HTTPS 백엔드로 전환하면서 제거해야 한다.**
 
 ### 앱이 의존하는 백엔드 계약
 
@@ -63,4 +58,5 @@ const WS_BASE  = 'ws://192.168.0.33:8080/ws';
 - **시세 색상은 한국 관례를 따른다: 빨강 = 상승, 파랑 = 하락** — 미국 시장과 반대다. `home.tsx`의 행 색상 로직과 `detail.tsx`의 `COLOR_BULL`/`COLOR_BEAR`를 참고할 것.
 - 경로 별칭 `@/*`는 저장소 루트를 가리킨다(`tsconfig.json`).
 - `detail.tsx`의 `renderSupportResistanceZones()`에는 라벨 겹침 방지 로직이 직접 구현되어 있다(Y 기준 정렬 후, 겹치는 라벨을 `MIN_DISTANCE`만큼 아래로 밀어냄). 오버레이를 수정할 때 이 로직을 보존할 것.
-- 백엔드를 호출하는 새 화면은 `API_BASE`/`WS_BASE` 상수와 `credentials: 'include'`를 직접 추가해야 한다 — 기존 화면을 그대로 따를 것.
+- 백엔드를 호출하는 새 화면은 `@/constants/config`에서 `API_BASE`/`WS_BASE`를 import하고 `credentials: 'include'`를 붙여야 한다 — 기존 화면을 그대로 따를 것.
+- 그 외 미사용 스타터 파일과 달리 `constants/config.ts`는 실제 화면들이 사용하는 파일이다.
