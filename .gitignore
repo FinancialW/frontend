@@ -4,6 +4,9 @@ __generated__
 web-build
 bare-apps
 
+# Expo 웹 정적 빌드 출력 (Vercel이 빌드하므로 커밋하지 않음)
+/dist
+
 # macOS
 .DS_Store
 
