@@ -309,9 +309,9 @@ export default function Detail() {
   // 이동평균선(MA) 표시 토글
   const [showMA5, setShowMA5] = useState(true);
   const [showMA20, setShowMA20] = useState(true);
-  // 지지/저항 존·추세선 표시 여부 (선이 많아 가독성이 떨어질 때 끌 수 있게)
-  const [showSR, setShowSR] = useState(true);
-  const [showTrend, setShowTrend] = useState(true);
+  // 지지/저항 존·추세선 표시 여부 — 처음엔 선이 많아 헷갈리지 않게 꺼두고, 원하면 범례에서 켠다
+  const [showSR, setShowSR] = useState(false);
+  const [showTrend, setShowTrend] = useState(false);
 
   // 마지막 토글 설정 복원 → 이후 변경될 때마다 저장.
   // 복원이 끝나기 전에는 저장하지 않는다 (기본값으로 덮어쓰는 것 방지).
