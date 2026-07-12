@@ -16,6 +16,7 @@ export default function RootLayout() {
           <Stack.Screen name="(tabs)/index" options={{ headerShown: false }} />
           <Stack.Screen name="(tabs)/home" options={{ headerShown: false }} />
           <Stack.Screen name="(tabs)/webview" options={{ title: '카카오 로그인' }} />
+          <Stack.Screen name="login-success" options={{ headerShown: false }} />
           <Stack.Screen name="detail" options={{ title: '종목 상세' }} />
           <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
         </Stack>
