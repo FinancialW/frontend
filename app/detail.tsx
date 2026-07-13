@@ -28,7 +28,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { LineChart } from "react-native-wagmi-charts";
 import Svg, { Line, Polyline } from "react-native-svg";
 
-import { API_BASE, WS_BASE } from "@/constants/config";
+import { API_BASE, createPriceSocket } from "@/constants/config";
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -164,6 +164,10 @@ const CHART_HEIGHT = 300; // 보이는 차트 높이
 // 따라서 차트 높이를 +40 주고 yGutter=0으로 두면 그릴 수 있는 영역이 정확히 CHART_HEIGHT가 된다.
 const X_AXIS_RESERVED = 40;
 const LINE_CHART_HEIGHT = CHART_HEIGHT + X_AXIS_RESERVED;
+
+// 1D 정규장(미 동부 09:30~16:00, 6.5시간)의 5분봉 개수.
+// 장중에는 X축을 이 개수로 고정해 선이 장 진행률만큼만 왼쪽부터 그려지게 한다 (토스 방식).
+const SESSION_CANDLES_1D = 78;
 
 // 토스 팔레트 (한국 관례: 빨강 = 상승, 파랑 = 하락)
 const COLOR_BULL = "#f04452"; // 상승 (빨강)
@@ -423,9 +427,9 @@ export default function Detail() {
 
       setData(candleData);
       if (candleData.length > 0) {
-        setCurrentPrice((prev) =>
-          prev === null ? candleData[candleData.length - 1].close : prev
-        );
+        // 헤더 현재가는 WS 틱과 폴링 양쪽에서 갱신한다 — 마지막 캔들의 close 가
+        // 사실상 최신 체결가라, WS 푸시가 뜸해도 폴링(5초)만으로 현재가가 움직인다.
+        setCurrentPrice(candleData[candleData.length - 1].close);
       }
     } catch (e) {
       console.error("데이터 불러오기 실패:", e);
@@ -478,7 +482,7 @@ export default function Detail() {
     if (!symbolParam) return;
 
     const connect = () => {
-      const ws = new WebSocket(WS_BASE);
+      const ws = createPriceSocket();
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -502,6 +506,14 @@ export default function Detail() {
             }
           }
         } catch {}
+      };
+
+      ws.onerror = (e: any) => {
+        console.log(`[상세 WS] 에러: ${e?.message ?? JSON.stringify(e)}`);
+      };
+
+      ws.onclose = (e) => {
+        console.log(`[상세 WS] 종료: code=${e.code} reason=${e.reason || "(없음)"}`);
       };
     };
 
@@ -557,6 +569,18 @@ export default function Detail() {
   const closes = useMemo(() => validData.map((d) => d.close), [validData]);
   const ma5 = useMemo(() => computeSMA(closes, 5), [closes]);
   const ma20 = useMemo(() => computeSMA(closes, 20), [closes]);
+
+  // 1D 는 X축을 정규장 전체 봉 개수로 고정한다 (데이터가 그보다 많으면 실제 개수 사용).
+  const xLength =
+    resolution === "1D"
+      ? Math.max(validData.length, SESSION_CANDLES_1D)
+      : validData.length;
+  // wagmi 가 실제로 선을 그리는 폭 — xLength > 데이터 개수면 전체 폭보다 좁아진다.
+  // MA·추세선·스크럽 오버레이도 이 폭 기준으로 X 좌표를 계산해야 차트와 어긋나지 않는다.
+  const pathWidth =
+    validData.length > 0
+      ? (SCREEN_WIDTH * validData.length) / xLength
+      : SCREEN_WIDTH;
 
   // 기간 내 최고/최저/현재
   const dataHigh = validData.length ? Math.max(...validData.map((d) => d.high)) : 0;
@@ -633,7 +657,7 @@ export default function Detail() {
     const build = (arr: (number | null)[]) =>
       arr
         .map((v, i) =>
-          v === null ? null : `${(i / denom) * SCREEN_WIDTH},${yFor(v)}`
+          v === null ? null : `${(i / denom) * pathWidth},${yFor(v)}`
         )
         .filter((p): p is string => p !== null)
         .join(" ");
@@ -644,7 +668,7 @@ export default function Detail() {
       ma20Count: ma20.filter((v) => v !== null).length,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ma5, ma20, validData.length, domainMin, domainSpan]);
+  }, [ma5, ma20, validData.length, domainMin, domainSpan, pathWidth]);
 
   // 🔥 최고점 / 최저점 가로선 + 라벨 (토스 스타일)
   // 현재가는 헤더의 큰 숫자로 이미 보여주므로 차트에는 표시하지 않는다 (선·배지 모두 제거).
@@ -765,14 +789,21 @@ export default function Detail() {
           // 시작 피벗이 보이는 구간 안이면 해당 캔들 인덱스에 정확히 앵커링
           let idx = validData.findIndex((d) => d.timestamp >= startTs);
           if (idx < 0) idx = validData.length - 1;
-          x1 = (idx / denom) * SCREEN_WIDTH;
+          x1 = (idx / denom) * pathWidth;
           y1 = yFor(tl.startPrice);
         }
 
-        const y2 = yFor(tl.currentProjectedPrice);
+        // X축이 정규장 전체로 고정된 1D 장중에는 마지막 봉이 화면 오른쪽 끝보다 왼쪽에 있으므로,
+        // 같은 기울기로 장 마감 시점까지 선을 연장해 오른쪽 끝까지 그린다 (라벨 가격도 그 시점 값).
+        const rightEdgeTs =
+          xLength > validData.length
+            ? firstTs + (xLength - 1) * getIntervalMs(resolution)
+            : lastTs;
+        const edgePrice = priceAt(rightEdgeTs);
+        const y2 = yFor(edgePrice);
         const color = tl.type === "RESISTANCE" ? COLOR_BULL : COLOR_BEAR;
         const role = tl.type === "RESISTANCE" ? "저항 추세선" : "지지 추세선";
-        return { index, x1, y1, x2: SCREEN_WIDTH, y2, color, role, price: tl.currentProjectedPrice };
+        return { index, x1, y1, x2: SCREEN_WIDTH, y2, color, role, price: edgePrice };
       })
       .filter((s): s is NonNullable<typeof s> => s !== null);
 
@@ -821,7 +852,7 @@ export default function Detail() {
     if (!scrubbing || activeIndex === null || validData.length === 0) return null;
     const idx = Math.min(Math.max(Math.round(activeIndex), 0), validData.length - 1);
     const denom = Math.max(validData.length - 1, 1);
-    const x = (idx / denom) * SCREEN_WIDTH;
+    const x = (idx / denom) * pathWidth;
     return (
       <View style={StyleSheet.absoluteFill} pointerEvents="none">
         <Svg width={SCREEN_WIDTH} height={CHART_HEIGHT}>
@@ -981,6 +1012,7 @@ export default function Detail() {
             <LineChart.Provider
               data={lineData}
               yRange={{ min: domainMin, max: domainMax }}
+              xLength={xLength}
               onCurrentIndexChange={(i) => setActiveIndex(i)}
             >
               <LineChart width={SCREEN_WIDTH} height={LINE_CHART_HEIGHT} yGutter={0}>

@@ -27,7 +27,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 
-import { API_BASE, WS_BASE } from '@/constants/config';
+import { API_BASE, createPriceSocket } from '@/constants/config';
 
 // 토스 팔레트 (detail.tsx와 통일)
 const COLOR_TEXT = '#191f28';
@@ -373,7 +373,7 @@ export default function Home() {
   const connectWebSocket = (symbols: string[]) => {
     wsRef.current?.close();
 
-    const ws = new WebSocket(WS_BASE);
+    const ws = createPriceSocket();
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -397,8 +397,12 @@ export default function Home() {
       } catch {}
     };
 
-    ws.onerror = () => {
-      console.log('WebSocket 연결 오류');
+    ws.onerror = (e: any) => {
+      console.log(`[홈 WS] 에러: ${e?.message ?? 'WebSocket 연결 오류'}`);
+    };
+
+    ws.onclose = (e) => {
+      console.log(`[홈 WS] 종료: code=${e.code} reason=${e.reason || '(없음)'}`);
     };
   };
 
